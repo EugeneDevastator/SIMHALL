@@ -1,3 +1,6 @@
+"""
+Knots Editor with 2 ropes
+"""
 import pyray as rl
 import math
 

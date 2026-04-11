@@ -1,5 +1,5 @@
 """
-Gravity CA - scalar potential field, pan/zoom, large grid.
+Gravity Cellular automata proof of concept.
 """
 import pyray as rl
 from pyray import ffi
@@ -9,7 +9,7 @@ import math
 
 SCREEN_W   = 1920
 SCREEN_H   = 1080
-GRID_SIZE  = 1000
+GRID_SIZE  = 200
 UI_PANEL_W = 280
 SIM_W      = SCREEN_W - UI_PANEL_W
 SIM_H      = SCREEN_H
@@ -29,29 +29,36 @@ mass  = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 gvx   = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 gvy   = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
-# render target matches screen sim area
 render_w = SIM_W
 render_h = SIM_H
 pixels   = np.zeros((render_h, render_w, 4), dtype=np.uint8)
 
-is_paused    = False
+_neighbors = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+_r1        = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+_r2        = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+_vmag      = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+
+_gxi2d = np.zeros((render_h, render_w), dtype=np.int32)
+_gyi2d = np.zeros((render_h, render_w), dtype=np.int32)
+_view_dirty = True
+
+is_paused     = False
 show_velocity = True
 vel_scale     = 8.0
 
-# view state: what grid cell is at screen center, and cells-per-pixel
-view_cx   = float(GRID_SIZE // 2)   # grid x at screen center
-view_cy   = float(GRID_SIZE // 2)   # grid y at screen center
-zoom      = float(SIM_W) / float(GRID_SIZE)  # pixels per cell (start: full grid fits)
-ZOOM_MIN  = 0.05
-ZOOM_MAX  = 40.0
+view_cx = float(GRID_SIZE // 2)
+view_cy = float(GRID_SIZE // 2)
+zoom    = float(SIM_W) / float(GRID_SIZE)
+ZOOM_MIN = 0.05
+ZOOM_MAX = 40.0
 
-_pan_last  = None   # last mouse pos during pan
+_pan_last    = None
 _drag_states = [False] * 8
 
 
 def screen_to_grid(sx, sy):
     cx = (sx - SIM_OX - SIM_W * 0.5) / zoom + view_cx
-    cy = (sy            - SIM_H * 0.5) / zoom + view_cy
+    cy = (sy           - SIM_H * 0.5) / zoom + view_cy
     return cx, cy
 
 
@@ -83,54 +90,76 @@ def clear_all():
     gvy[:]   = 0.0
 
 
+def _roll_neighbors(src, out):
+    out[:] = 0.0
+    out[1:,  :]  += src[:-1, :]
+    out[0,   :]  += src[-1,  :]
+    out[:-1, :]  += src[1:,  :]
+    out[-1,  :]  += src[0,   :]
+    out[:,  1:]  += src[:, :-1]
+    out[:,   0]  += src[:,  -1]
+    out[:, :-1]  += src[:,  1:]
+    out[:,  -1]  += src[:,   0]
+
+
 def step():
-    global field, mass, gvx, gvy
+    global field, mass, gvx, gvy, _vmag, _neighbors, _r1, _r2
 
     field += mass * EMIT_RATE
 
     for _ in range(DIFFUSE_STEPS):
-        neighbors = (
-                np.roll(field,  1, axis=0) +
-                np.roll(field, -1, axis=0) +
-                np.roll(field,  1, axis=1) +
-                np.roll(field, -1, axis=1)
-        )
-        field += DIFFUSE_RATE * (neighbors - 4.0 * field)
+        _roll_neighbors(field, _neighbors)
+        field += DIFFUSE_RATE * (_neighbors - 4.0 * field)
 
     field *= (1.0 - DECAY_RATE)
     np.clip(field, 0.0, FIELD_CAP, out=field)
 
-    gx = (np.roll(field, -1, axis=1) - np.roll(field, 1, axis=1)) * 0.5
-    gy = (np.roll(field, -1, axis=0) - np.roll(field, 1, axis=0)) * 0.5
+    gx = np.empty_like(field)
+    gy = np.empty_like(field)
+    gx[:, 1:-1] = (field[:, 2:]  - field[:, :-2]) * 0.5
+    gx[:,  0]   = (field[:,  1]  - field[:,  -1])  * 0.5
+    gx[:, -1]   = (field[:,  0]  - field[:, -2])   * 0.5
+    gy[1:-1, :] = (field[2:,  :] - field[:-2, :])  * 0.5
+    gy[0,    :] = (field[1,   :] - field[-1,  :])  * 0.5
+    gy[-1,   :] = (field[0,   :] - field[-2,  :])  * 0.5
 
     has_mass = mass > 0.0
-    gvx = np.where(has_mass, (gvx + gx * GRAD_ACCEL) * VEL_DAMPING, 0.0)
-    gvy = np.where(has_mass, (gvy + gy * GRAD_ACCEL) * VEL_DAMPING, 0.0)
+    gvx[has_mass]  = (gvx[has_mass] + gx[has_mass] * GRAD_ACCEL) * VEL_DAMPING
+    gvy[has_mass]  = (gvy[has_mass] + gy[has_mass] * GRAD_ACCEL) * VEL_DAMPING
+    gvx[~has_mass] = 0.0
+    gvy[~has_mass] = 0.0
 
-    vmag = np.sqrt(gvx * gvx + gvy * gvy)
-    over = vmag > VEL_MAX
-    safe = np.where(over, vmag, 1.0)
-    gvx  = np.where(over, gvx / safe * VEL_MAX, gvx)
-    gvy  = np.where(over, gvy / safe * VEL_MAX, gvy)
+    np.multiply(gvx, gvx, out=_vmag)
+    _vmag += gvy * gvy
+    np.sqrt(_vmag, out=_vmag)
+
+    over = _vmag > VEL_MAX
+    if np.any(over):
+        safe = np.where(over, _vmag, 1.0)
+        gvx[over] = gvx[over] / safe[over] * VEL_MAX
+        gvy[over] = gvy[over] / safe[over] * VEL_MAX
 
     avx   = np.abs(gvx)
     avy   = np.abs(gvy)
     total = avx + avy + 1e-9
     ph    = avx / total
 
-    vmag      = np.sqrt(gvx * gvx + gvy * gvy)
-    move_prob = np.tanh(vmag * 3.0)
-    move_mask = has_mass & (vmag > 0.001)
+    np.multiply(gvx, gvx, out=_vmag)
+    _vmag += gvy * gvy
+    np.sqrt(_vmag, out=_vmag)
 
-    r1 = np.random.random((GRID_SIZE, GRID_SIZE)).astype(np.float32)
-    r2 = np.random.random((GRID_SIZE, GRID_SIZE)).astype(np.float32)
+    move_prob = np.tanh(_vmag * 3.0)
+    move_mask = has_mass & (_vmag > 0.001)
 
-    choose_h = r1 < ph
+    _r1[:] = np.random.random((GRID_SIZE, GRID_SIZE))
+    _r2[:] = np.random.random((GRID_SIZE, GRID_SIZE))
+
+    choose_h = _r1 < ph
     mdx = np.where(choose_h, np.sign(gvx).astype(np.int32), 0)
     mdy = np.where(choose_h, 0, np.sign(gvy).astype(np.int32))
 
     has_dir = (mdx != 0) | (mdy != 0)
-    do_move = move_mask & has_dir & (r2 < move_prob)
+    do_move = move_mask & has_dir & (_r2 < move_prob)
 
     move_ys, move_xs = np.where(do_move)
 
@@ -154,47 +183,34 @@ def step():
             gvx[cmy, cmx] = gvx[cty, ctx]; gvy[cmy, cmx] = gvy[cty, ctx]
             gvx[cty, ctx] = tvx;           gvy[cty, ctx] = tvy
 
-        free      = ~occupied
-        move_xs   = move_xs[free];   move_ys   = move_ys[free]
-        target_xs = target_xs[free]; target_ys = target_ys[free]
+        free = ~occupied
+        fmx = move_xs[free];   fmy = move_ys[free]
+        ftx = target_xs[free]; fty = target_ys[free]
 
-        if len(move_xs) > 0:
-            nm = mass.copy(); nvx = gvx.copy(); nvy = gvy.copy()
-            nm[target_ys,  target_xs] = mass[move_ys, move_xs]
-            nvx[target_ys, target_xs] = gvx[move_ys,  move_xs]
-            nvy[target_ys, target_xs] = gvy[move_ys,  move_xs]
-            nm[move_ys,  move_xs] = 0.0
-            nvx[move_ys, move_xs] = 0.0
-            nvy[move_ys, move_xs] = 0.0
-            mass = nm; gvx = nvx; gvy = nvy
+        if len(fmx) > 0:
+            mass[fty, ftx] = mass[fmy, fmx]
+            gvx[fty,  ftx] = gvx[fmy,  fmx]
+            gvy[fty,  ftx] = gvy[fmy,  fmx]
+            mass[fmy, fmx] = 0.0
+            gvx[fmy,  fmx] = 0.0
+            gvy[fmy,  fmx] = 0.0
+
+
+def _rebuild_index_maps():
+    global _gxi2d, _gyi2d
+    px_xs = np.arange(render_w, dtype=np.float32)
+    px_ys = np.arange(render_h, dtype=np.float32)
+    gxf = (px_xs - SIM_W * 0.5) / zoom + view_cx
+    gyf = (px_ys - SIM_H * 0.5) / zoom + view_cy
+    gxi = np.clip(gxf.astype(np.int32), 0, GRID_SIZE - 1)
+    gyi = np.clip(gyf.astype(np.int32), 0, GRID_SIZE - 1)
+    _gyi2d = gyi[:, np.newaxis] * np.ones(render_w, dtype=np.int32)
+    _gxi2d = np.ones(render_h, dtype=np.int32)[:, np.newaxis] * gxi[np.newaxis, :]
 
 
 def build_pixels():
-    # visible grid region
-    half_w = SIM_W * 0.5 / zoom
-    half_h = SIM_H * 0.5 / zoom
-
-    gx0 = int(math.floor(view_cx - half_w))
-    gy0 = int(math.floor(view_cy - half_h))
-    gx1 = int(math.ceil( view_cx + half_w))
-    gy1 = int(math.ceil( view_cy + half_h))
-
-    # sample grid coords for every screen pixel
-    px_xs = np.arange(render_w, dtype=np.float32)
-    px_ys = np.arange(render_h, dtype=np.float32)
-
-    gxf = (px_xs - SIM_W * 0.5) / zoom + view_cx
-    gyf = (px_ys - SIM_H * 0.5) / zoom + view_cy
-
-    gxi = np.clip(gxf.astype(np.int32), 0, GRID_SIZE - 1)
-    gyi = np.clip(gyf.astype(np.int32), 0, GRID_SIZE - 1)
-
-    # 2D index arrays
-    gxi2d = np.tile(gxi[np.newaxis, :], (render_h, 1))
-    gyi2d = np.tile(gyi[:, np.newaxis], (1, render_w))
-
-    f_vals = field[gyi2d, gxi2d]
-    m_vals = mass[gyi2d,  gxi2d]
+    f_vals = field[_gyi2d, _gxi2d]
+    m_vals = mass[_gyi2d,  _gxi2d]
 
     f_norm = np.clip(f_vals / 40.0, 0.0, 1.0)
     pixels[:, :, 0] = (f_norm * 30).astype(np.uint8)
@@ -202,16 +218,18 @@ def build_pixels():
     pixels[:, :, 2] = (f_norm * 80).astype(np.uint8)
     pixels[:, :, 3] = 255
 
-    has_m = m_vals > 0.0
+    has_m  = m_vals > 0.0
     bright = np.clip(m_vals / 3.0, 0.3, 1.0)
-    pixels[:, :, 0] = np.where(has_m, (bright * 255).astype(np.uint8), pixels[:, :, 0])
-    pixels[:, :, 1] = np.where(has_m, (bright * 180).astype(np.uint8), pixels[:, :, 1])
-    pixels[:, :, 2] = np.where(has_m, 60, pixels[:, :, 2])
+    b255   = (bright * 255).astype(np.uint8)
+    b180   = (bright * 180).astype(np.uint8)
+    pixels[:, :, 0][has_m] = b255[has_m]
+    pixels[:, :, 1][has_m] = b180[has_m]
+    pixels[:, :, 2][has_m] = 60
 
 
 def draw_velocity_vectors():
     if zoom < 2.0:
-        return  # too zoomed out, skip
+        return
     pys, pxs = np.where(mass > 0.0)
     for i in range(len(pys)):
         py, px = int(pys[i]), int(pxs[i])
@@ -277,7 +295,6 @@ def draw_ui(mgx, mgy):
     blue  = (rl.Color(50,100,160,255), rl.Color(70,130,200,255))
     red   = (rl.Color(160,50,50,255),  rl.Color(200,70,70,255))
     green = (rl.Color(50,140,50,255),  rl.Color(70,180,70,255))
-    grey  = (rl.Color(140,140,140,255),rl.Color(160,160,160,255))
 
     if button("Add 10 Particles",   yc, *blue):  add_particles(10)
     yc += bh + 4
@@ -301,12 +318,12 @@ def draw_ui(mgx, mgy):
     yc += bh + 12
 
     SW = bw - 52
-    EMIT_RATE,   yc = draw_slider("Emit Rate",    16, yc, SW, EMIT_RATE,   0.0,  10.0, 0)
-    DIFFUSE_RATE,yc = draw_slider("Diffuse Rate", 16, yc, SW, DIFFUSE_RATE,0.01, 0.24, 1)
-    DECAY_RATE,  yc = draw_slider("Decay Rate",   16, yc, SW, DECAY_RATE,  0.001,0.1,  2)
-    GRAD_ACCEL,  yc = draw_slider("Grad Accel",   16, yc, SW, GRAD_ACCEL,  0.0,  0.5,  3)
-    VEL_DAMPING, yc = draw_slider("Vel Damping",  16, yc, SW, VEL_DAMPING, 0.9,  1.0,  4, "{:.4f}")
-    vel_scale,   yc = draw_slider("Vel Display",  16, yc, SW, vel_scale,   1.0,  20.0, 5)
+    EMIT_RATE,    yc = draw_slider("Emit Rate",    16, yc, SW, EMIT_RATE,    0.0,  10.0, 0)
+    DIFFUSE_RATE, yc = draw_slider("Diffuse Rate", 16, yc, SW, DIFFUSE_RATE, 0.01, 0.24, 1)
+    DECAY_RATE,   yc = draw_slider("Decay Rate",   16, yc, SW, DECAY_RATE,   0.001,0.1,  2)
+    GRAD_ACCEL,   yc = draw_slider("Grad Accel",   16, yc, SW, GRAD_ACCEL,   0.0,  0.5,  3)
+    VEL_DAMPING,  yc = draw_slider("Vel Damping",  16, yc, SW, VEL_DAMPING,  0.9,  1.0,  4, "{:.4f}")
+    vel_scale,    yc = draw_slider("Vel Display",  16, yc, SW, vel_scale,    1.0,  20.0, 5)
     yc += 6
 
     n_parts   = int(np.sum(mass > 0.0))
@@ -334,13 +351,10 @@ def draw_ui(mgx, mgy):
 
 
 def main():
-    global is_paused, view_cx, view_cy, zoom, _pan_last
+    global is_paused, view_cx, view_cy, zoom, _pan_last, _view_dirty
 
     rl.init_window(SCREEN_W, SCREEN_H, "Gravity CA")
     rl.set_target_fps(60)
-
-    # render texture covers only the sim area
-    rt = rl.load_render_texture(render_w, render_h)
 
     img     = rl.gen_image_color(render_w, render_h, rl.BLACK)
     sim_tex = rl.load_texture_from_image(img)
@@ -348,6 +362,8 @@ def main():
     rl.set_texture_filter(sim_tex, rl.TEXTURE_FILTER_POINT)
 
     add_particles(20)
+    _rebuild_index_maps()
+    _view_dirty = False
 
     pixels_ptr = ffi.cast("void *", ffi.from_buffer(pixels))
 
@@ -355,22 +371,20 @@ def main():
         if rl.is_key_pressed(rl.KEY_SPACE):
             is_paused = not is_paused
 
-        mp  = rl.get_mouse_position()
+        mp     = rl.get_mouse_position()
         in_sim = SIM_OX <= mp.x < SCREEN_W and 0 <= mp.y < SIM_H
 
-        # --- zoom ---
         if in_sim:
             wheel = rl.get_mouse_wheel_move()
             if wheel != 0.0:
-                # zoom toward mouse cursor
                 gx_before, gy_before = screen_to_grid(mp.x, mp.y)
                 zoom *= (1.15 ** wheel)
                 zoom  = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
                 gx_after, gy_after = screen_to_grid(mp.x, mp.y)
                 view_cx += gx_before - gx_after
                 view_cy += gy_before - gy_after
+                _view_dirty = True
 
-        # --- pan (RMB) ---
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_RIGHT) and in_sim:
             _pan_last = (mp.x, mp.y)
         if rl.is_mouse_button_down(rl.MOUSE_BUTTON_RIGHT) and _pan_last is not None:
@@ -378,18 +392,21 @@ def main():
             dy = mp.y - _pan_last[1]
             view_cx -= dx / zoom
             view_cy -= dy / zoom
-            _pan_last = (mp.x, mp.y)
+            _pan_last   = (mp.x, mp.y)
+            _view_dirty = True
         if rl.is_mouse_button_released(rl.MOUSE_BUTTON_RIGHT):
             _pan_last = None
 
-        # clamp view
         view_cx = max(0.0, min(float(GRID_SIZE), view_cx))
         view_cy = max(0.0, min(float(GRID_SIZE), view_cy))
+
+        if _view_dirty:
+            _rebuild_index_maps()
+            _view_dirty = False
 
         mgx, mgy = screen_to_grid(mp.x, mp.y)
         mgx = int(mgx); mgy = int(mgy)
 
-        # --- place particle on LMB in sim area ---
         if rl.is_mouse_button_down(rl.MOUSE_BUTTON_LEFT) and in_sim:
             if 0 <= mgx < GRID_SIZE and 0 <= mgy < GRID_SIZE:
                 if mass[mgy, mgx] == 0.0:
@@ -419,7 +436,6 @@ def main():
         rl.end_drawing()
 
     rl.unload_texture(sim_tex)
-    rl.unload_render_texture(rt)
     rl.close_window()
 
 
