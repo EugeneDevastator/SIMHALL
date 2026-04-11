@@ -22,8 +22,8 @@ ROPE_COLORS = [
     rl.Color(180, 160,  10, 255),
 ]
 
-Z_DARK  = 0.45   # multiply color channels at z_min
-Z_LIGHT = 1.55   # multiply color channels at z_max
+Z_DARK  = 0.45
+Z_LIGHT = 1.55
 Z_MIN   = -4
 Z_MAX   =  4
 
@@ -37,12 +37,6 @@ def z_tint(base_color, z):
         int(max(0, min(255, base_color.b * f))),
         255
     )
-
-def outline_tint(z):
-    t = (z - Z_MIN) / max(Z_MAX - Z_MIN, 1)
-    t = max(0.0, min(1.0, t))
-    v = int(30 + 180 * t)
-    return rl.Color(v, v, v, 255)
 
 def catmull_to_bezier(pts):
     n = len(pts)
@@ -67,7 +61,6 @@ def eval_cubic(seg, t):
     return (x, y)
 
 def build_segments(pts):
-    # returns list of (poly_points, z_start, z_end) per control-point interval
     if len(pts) < 2:
         return []
     xy = [(p[0], p[1]) for p in pts]
@@ -114,21 +107,19 @@ def v2(x, y):
     return rl.Vector2(x, y)
 
 def draw_strip_2d_zcolor(poly, vnorm, half, base_color, z0, z1, is_outline):
-    # per-quad color interpolated by z
     n = len(poly)
     if n < 2:
         return
     total = n - 1
     for i in range(total):
-        t0 = i / total
-        t1 = (i + 1) / total
-        z_a = z0 + (z1 - z0) * t0
-        z_b = z0 + (z1 - z0) * t1
-        # use midpoint z for the quad color
-        z_mid = (z_a + z_b) * 0.5
         if is_outline:
-            col = outline_tint(z_mid)
+            col = OUTLINE_COL
         else:
+            t0 = i / total
+            t1 = (i + 1) / total
+            z_a = z0 + (z1 - z0) * t0
+            z_b = z0 + (z1 - z0) * t1
+            z_mid = (z_a + z_b) * 0.5
             col = z_tint(base_color, z_mid)
 
         ax, ay = poly[i]
@@ -206,12 +197,14 @@ def rebuild(splines):
     for si, s in enumerate(splines):
         for poly, z0, z1 in build_segments(s['pts']):
             vnorm = build_vnormals(poly)
-            # sort key: average z of segment
             z_avg = (z0 + z1) * 0.5
             draw_segs.append({'poly': poly, 'vnorm': vnorm,
                               'z0': z0, 'z1': z1, 'z_avg': z_avg,
                               'si': si, 'thick': s['thick'], 'color': s['color']})
     return fp, draw_segs
+
+def is_endpoint(pts, pi):
+    return pi == 0 or pi == len(pts) - 1
 
 def main():
     rl.init_window(SCREEN_W, SCREEN_H, "Knot Spline Editor")
@@ -226,11 +219,13 @@ def main():
     ]
 
     full_polys, draw_segs = rebuild(splines)
-    drag_s = -1
-    drag_p = -1
-    hov_s  = -1
-    hov_p  = -1
-    dirty  = True
+    drag_s  = -1
+    drag_p  = -1
+    hov_s   = -1
+    hov_p   = -1
+    dirty   = True
+    # shift-drag-extend: when we spawn a new endpoint via shift+drag
+    extend_active = False
 
     while not rl.window_should_close():
         mx = float(rl.get_mouse_x())
@@ -249,6 +244,7 @@ def main():
                 if bd < HOVER_R * 2.5:
                     hov_p = bi
 
+        # W/S adjust z of hovered point
         if hov_s >= 0 and hov_p >= 0:
             p = splines[hov_s]['pts'][hov_p]
             if rl.is_key_pressed(rl.KEY_W):
@@ -258,6 +254,7 @@ def main():
                 splines[hov_s]['pts'][hov_p] = (p[0], p[1], p[2] - 1)
                 dirty = True
 
+        # A/D thickness, Q/E order
         if hov_s >= 0:
             if rl.is_key_pressed(rl.KEY_A):
                 splines[hov_s]['thick'] = max(MIN_THICK, splines[hov_s]['thick'] - THICK_STEP)
@@ -274,17 +271,34 @@ def main():
                 hov_s += 1
                 dirty = True
 
+        # LMB press: start drag or shift+endpoint extend
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT):
+            extend_active = False
             for si in range(len(splines)-1, -1, -1):
                 bi, bd = nearest_pt(splines[si]['pts'], mx, my)
                 if bd < HOVER_R:
-                    drag_s = si
-                    drag_p = bi
+                    if shift and is_endpoint(splines[si]['pts'], bi):
+                        # insert new point at the end being dragged
+                        pts = splines[si]['pts']
+                        new_pt = (mx, my, pts[bi][2])
+                        if bi == 0:
+                            pts.insert(0, new_pt)
+                            drag_p = 0
+                        else:
+                            pts.append(new_pt)
+                            drag_p = len(pts) - 1
+                        drag_s = si
+                        extend_active = True
+                        dirty = True
+                    else:
+                        drag_s = si
+                        drag_p = bi
                     break
 
         if rl.is_mouse_button_released(rl.MOUSE_BUTTON_LEFT):
             drag_s = -1
             drag_p = -1
+            extend_active = False
 
         if drag_s >= 0:
             delta = rl.get_mouse_delta()
@@ -292,19 +306,22 @@ def main():
             splines[drag_s]['pts'][drag_p] = (p[0]+delta.x, p[1]+delta.y, p[2])
             dirty = True
 
+        # RMB: add or delete point
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_RIGHT):
             t = hov_s if hov_s >= 0 else 0
             sp = splines[t]
             if shift:
+                # delete: never remove endpoints, only interior points
                 if len(sp['pts']) > 2:
                     bi, bd = nearest_pt(sp['pts'], mx, my)
-                    if bd < HOVER_R * 3:
+                    if bd < HOVER_R * 3 and not is_endpoint(sp['pts'], bi):
                         sp['pts'].pop(bi)
                         dirty = True
             else:
                 insert_near(sp['pts'], full_polys[t], mx, my)
                 dirty = True
 
+        # --- draw ---
         rl.begin_drawing()
         rl.clear_background(BG)
 
@@ -323,14 +340,17 @@ def main():
             for pi, p in enumerate(sp['pts']):
                 px, py, pz = p
                 is_drag = (si == drag_s and pi == drag_p)
+                is_end  = is_endpoint(sp['pts'], pi)
                 r = HOVER_R * 1.4 if is_drag else HOVER_R
-                rl.draw_circle(int(px), int(py), int(r), pt_col)
+                # endpoints get a slightly different fill to hint shift-drag
+                fill = lighten(pt_col, 40) if is_end else pt_col
+                rl.draw_circle(int(px), int(py), int(r), fill)
                 rl.draw_circle_lines(int(px), int(py), int(r), OUTLINE_COL)
                 rl.draw_text(str(pz), int(px)+int(r)+2, int(py)-FONT_SIZE//2,
                              FONT_SIZE-8, OUTLINE_COL)
 
         rl.draw_text(
-            "LMB drag | RMB add | Shift+RMB del | QE spline-order | AD thick | WS pt-z",
+            "LMB drag | Shift+LMB endpoint=extend | RMB add | Shift+RMB del interior | QE order | AD thick | WS pt-z",
             20, 20, FONT_SIZE, rl.Color(60,60,60,255)
         )
         if hov_s >= 0:
