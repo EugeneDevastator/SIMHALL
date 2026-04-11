@@ -13,6 +13,37 @@ THICK_STEP = 2.0
 SEGMENTS = 120
 OUTLINE_PAD = 6.0
 
+DEFAULT_THICK = 18.0
+ROPE_COLORS = [
+    rl.Color(210, 100,  20, 255),
+    rl.Color( 20, 150,  40, 255),
+    rl.Color( 30,  80, 200, 255),
+    rl.Color(160,  30, 160, 255),
+    rl.Color(180, 160,  10, 255),
+]
+
+Z_DARK  = 0.45   # multiply color channels at z_min
+Z_LIGHT = 1.55   # multiply color channels at z_max
+Z_MIN   = -4
+Z_MAX   =  4
+
+def z_tint(base_color, z):
+    t = (z - Z_MIN) / max(Z_MAX - Z_MIN, 1)
+    t = max(0.0, min(1.0, t))
+    f = Z_DARK + (Z_LIGHT - Z_DARK) * t
+    return rl.Color(
+        int(max(0, min(255, base_color.r * f))),
+        int(max(0, min(255, base_color.g * f))),
+        int(max(0, min(255, base_color.b * f))),
+        255
+    )
+
+def outline_tint(z):
+    t = (z - Z_MIN) / max(Z_MAX - Z_MIN, 1)
+    t = max(0.0, min(1.0, t))
+    v = int(30 + 180 * t)
+    return rl.Color(v, v, v, 255)
+
 def catmull_to_bezier(pts):
     n = len(pts)
     segs = []
@@ -36,20 +67,20 @@ def eval_cubic(seg, t):
     return (x, y)
 
 def build_segments(pts):
-    # pts: list of (x, y, z)
-    # returns list of (poly_points, z_value) per control-point interval
+    # returns list of (poly_points, z_start, z_end) per control-point interval
     if len(pts) < 2:
         return []
     xy = [(p[0], p[1]) for p in pts]
     bezier_segs = catmull_to_bezier(xy)
     result = []
     for i, seg in enumerate(bezier_segs):
-        z = pts[i][2]
+        z0 = pts[i][2]
+        z1 = pts[i+1][2]
         poly = []
         for j in range(SEGMENTS):
             poly.append(eval_cubic(seg, j / SEGMENTS))
         poly.append(seg[3])
-        result.append((poly, z))
+        result.append((poly, z0, z1))
     return result
 
 def seg_normal(ax, ay, bx, by):
@@ -82,11 +113,24 @@ def build_vnormals(poly):
 def v2(x, y):
     return rl.Vector2(x, y)
 
-def draw_strip_2d(poly, vnorm, half, color):
+def draw_strip_2d_zcolor(poly, vnorm, half, base_color, z0, z1, is_outline):
+    # per-quad color interpolated by z
     n = len(poly)
     if n < 2:
         return
-    for i in range(n - 1):
+    total = n - 1
+    for i in range(total):
+        t0 = i / total
+        t1 = (i + 1) / total
+        z_a = z0 + (z1 - z0) * t0
+        z_b = z0 + (z1 - z0) * t1
+        # use midpoint z for the quad color
+        z_mid = (z_a + z_b) * 0.5
+        if is_outline:
+            col = outline_tint(z_mid)
+        else:
+            col = z_tint(base_color, z_mid)
+
         ax, ay = poly[i]
         bx, by = poly[i+1]
         nx0, ny0 = vnorm[i]
@@ -95,8 +139,8 @@ def draw_strip_2d(poly, vnorm, half, color):
         r0 = v2(ax - nx0*half, ay - ny0*half)
         l1 = v2(bx + nx1*half, by + ny1*half)
         r1 = v2(bx - nx1*half, by - ny1*half)
-        rl.draw_triangle(l0, r0, l1, color)
-        rl.draw_triangle(r0, r1, l1, color)
+        rl.draw_triangle(l0, r0, l1, col)
+        rl.draw_triangle(r0, r1, l1, col)
 
 def nearest_pt(pts, mx, my):
     best_i, best_d = -1, float('inf')
@@ -124,7 +168,6 @@ def nearest_seg_poly(poly, mx, my):
     return best_i, best_d
 
 def full_poly(pts):
-    # flat poly for hover detection
     if len(pts) < 2:
         return []
     xy = [(p[0], p[1]) for p in pts]
@@ -159,12 +202,14 @@ def lighten(c, a=80):
 
 def rebuild(splines):
     fp = [full_poly(s['pts']) for s in splines]
-    # per-spline segments: list of (poly, z, si, thick, color)
     draw_segs = []
     for si, s in enumerate(splines):
-        for poly, z in build_segments(s['pts']):
+        for poly, z0, z1 in build_segments(s['pts']):
             vnorm = build_vnormals(poly)
-            draw_segs.append({'poly': poly, 'vnorm': vnorm, 'z': z,
+            # sort key: average z of segment
+            z_avg = (z0 + z1) * 0.5
+            draw_segs.append({'poly': poly, 'vnorm': vnorm,
+                              'z0': z0, 'z1': z1, 'z_avg': z_avg,
                               'si': si, 'thick': s['thick'], 'color': s['color']})
     return fp, draw_segs
 
@@ -175,16 +220,16 @@ def main():
 
     splines = [
         {'pts': [(400.0,400.0,0),(700.0,300.0,1),(1000.0,500.0,0),(1300.0,400.0,0)],
-         'color': rl.Color(210, 100, 20, 255), 'thick': 18.0},
+         'color': ROPE_COLORS[0], 'thick': DEFAULT_THICK},
         {'pts': [(400.0,600.0,0),(700.0,700.0,0),(1000.0,500.0,1),(1300.0,650.0,0)],
-         'color': rl.Color(20, 150, 40, 255), 'thick': 18.0},
+         'color': ROPE_COLORS[1], 'thick': DEFAULT_THICK},
     ]
 
     full_polys, draw_segs = rebuild(splines)
     drag_s = -1
     drag_p = -1
     hov_s  = -1
-    hov_p  = -1  # hovered control point index
+    hov_p  = -1
     dirty  = True
 
     while not rl.window_should_close():
@@ -196,7 +241,6 @@ def main():
             full_polys, draw_segs = rebuild(splines)
             dirty = False
 
-        # hover detection
         if drag_s == -1:
             hov_s = hovered_spline_idx(splines, full_polys, mx, my)
             hov_p = -1
@@ -205,7 +249,6 @@ def main():
                 if bd < HOVER_R * 2.5:
                     hov_p = bi
 
-        # z adjust on hovered control point
         if hov_s >= 0 and hov_p >= 0:
             p = splines[hov_s]['pts'][hov_p]
             if rl.is_key_pressed(rl.KEY_W):
@@ -215,7 +258,6 @@ def main():
                 splines[hov_s]['pts'][hov_p] = (p[0], p[1], p[2] - 1)
                 dirty = True
 
-        # thickness / z-order of whole spline
         if hov_s >= 0:
             if rl.is_key_pressed(rl.KEY_A):
                 splines[hov_s]['thick'] = max(MIN_THICK, splines[hov_s]['thick'] - THICK_STEP)
@@ -232,7 +274,6 @@ def main():
                 hov_s += 1
                 dirty = True
 
-        # drag
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT):
             for si in range(len(splines)-1, -1, -1):
                 bi, bd = nearest_pt(splines[si]['pts'], mx, my)
@@ -251,7 +292,6 @@ def main():
             splines[drag_s]['pts'][drag_p] = (p[0]+delta.x, p[1]+delta.y, p[2])
             dirty = True
 
-        # add/remove points
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_RIGHT):
             t = hov_s if hov_s >= 0 else 0
             sp = splines[t]
@@ -265,30 +305,27 @@ def main():
                 insert_near(sp['pts'], full_polys[t], mx, my)
                 dirty = True
 
-        # --- draw ---
         rl.begin_drawing()
         rl.clear_background(BG)
 
-        # sort segments by z, then by spline index for stable order
-        sorted_segs = sorted(draw_segs, key=lambda s: (s['z'], s['si']))
+        sorted_segs = sorted(draw_segs, key=lambda s: (s['z_avg'], s['si']))
 
         for seg in sorted_segs:
-            draw_strip_2d(seg['poly'], seg['vnorm'],
-                          seg['thick'] * 0.5 + OUTLINE_PAD, OUTLINE_COL)
-            draw_strip_2d(seg['poly'], seg['vnorm'],
-                          seg['thick'] * 0.5, seg['color'])
+            half_out = seg['thick'] * 0.5 + OUTLINE_PAD
+            half_in  = seg['thick'] * 0.5
+            draw_strip_2d_zcolor(seg['poly'], seg['vnorm'], half_out,
+                                 seg['color'], seg['z0'], seg['z1'], True)
+            draw_strip_2d_zcolor(seg['poly'], seg['vnorm'], half_in,
+                                 seg['color'], seg['z0'], seg['z1'], False)
 
-        # control points
         for si, sp in enumerate(splines):
             pt_col = lighten(sp['color'], 80)
             for pi, p in enumerate(sp['pts']):
                 px, py, pz = p
                 is_drag = (si == drag_s and pi == drag_p)
-                is_hov  = (si == hov_s  and pi == hov_p)
                 r = HOVER_R * 1.4 if is_drag else HOVER_R
                 rl.draw_circle(int(px), int(py), int(r), pt_col)
                 rl.draw_circle_lines(int(px), int(py), int(r), OUTLINE_COL)
-                # z label
                 rl.draw_text(str(pz), int(px)+int(r)+2, int(py)-FONT_SIZE//2,
                              FONT_SIZE-8, OUTLINE_COL)
 
