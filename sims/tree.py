@@ -12,7 +12,6 @@ PANEL_X = 810
 PANEL_W = 280
 GROWTH_SPEED = 2.0
 MAIN_DEFLECTION = math.pi / 36
-BRANCH_ANGLE = math.pi / 3
 CURVE_X = PANEL_X + 10
 CURVE_Y = 60
 CURVE_W = 260
@@ -51,6 +50,7 @@ class TreeState:
         self.grow_timer = 0.0
         self.grow_interval = 0.1
         self.branch_from_start = False
+        self.branch_angle = math.pi / 3
 
     def node_by_id(self, nid):
         for n in self.nodes:
@@ -100,7 +100,6 @@ def tree_step(state, curve):
     to_edge = {e.to_id: e for e in state.edges}
     endpoints = [n for n in state.nodes if n.is_endpoint]
 
-    # compute raw desired rate per endpoint from curve
     rates = []
     for ep in endpoints:
         age = state.global_time - ep.birth_time
@@ -121,7 +120,6 @@ def tree_step(state, curve):
         parent_edge = to_edge.get(ep.id)
         angle = parent_edge.angle if parent_edge else 0.0
 
-        # movement gated by food scale — no food, no growth
         effective_speed = GROWTH_SPEED * 2 * scale
         dx = math.sin(angle) * effective_speed
         dy = -math.cos(angle) * effective_speed
@@ -140,7 +138,7 @@ def tree_step(state, curve):
             ep.is_endpoint = False
 
             main_angle = angle + ep.branch_side * MAIN_DEFLECTION
-            branch_angle_val = angle + ep.branch_side * BRANCH_ANGLE
+            branch_angle_val = angle + ep.branch_side * state.branch_angle
 
             child_birth = 0 if state.branch_from_start else state.global_time
 
@@ -178,39 +176,52 @@ def draw_tree(state):
         else:
             rl.draw_circle(int(n.x), int(n.y), 2, rl.Color(68, 170, 68, 255))
 
+# font sizes: original * 1.5, rounded
+# 11->17, 12->18, 13->20, 14->21
+
 def draw_panel(state, curve, dragging_point):
     rl.draw_rectangle(PANEL_X, 0, PANEL_W, SCREEN_H, rl.Color(42, 42, 42, 255))
 
-    rl.draw_text("Branching Rate Curve", PANEL_X + 10, 10, 14, rl.WHITE)
-    rl.draw_text("Age ratio vs Spawn Rate  (top=high)", PANEL_X + 10, 30, 11, rl.Color(170,170,170,255))
+    rl.draw_text("Branching Rate Curve", PANEL_X + 10, 10, 21, rl.WHITE)
+    rl.draw_text("Age ratio vs Spawn Rate  (top=high)", PANEL_X + 10, 34, 17, rl.Color(170,170,170,255))
 
     draw_curve(curve, dragging_point)
 
     endpoint_count = sum(1 for n in state.nodes if n.is_endpoint)
     height_m = state.max_height / 100.0
     stats = f"Tips: {endpoint_count}  Height: {height_m:.2f}m"
-    rl.draw_text(stats, PANEL_X + 10, CURVE_Y + CURVE_H + 10, 12, rl.Color(170,170,170,255))
+    rl.draw_text(stats, PANEL_X + 10, CURVE_Y + CURVE_H + 10, 18, rl.Color(170,170,170,255))
 
-    y = CURVE_Y + CURVE_H + 30
+    y = CURVE_Y + CURVE_H + 34
 
-    rl.draw_text(f"Max Tips: {state.max_branches}", PANEL_X + 10, y, 13, rl.WHITE)
-    y += 18
     slider_x = PANEL_X + 10
     slider_w = CURVE_W
     slider_h = 14
+
+    rl.draw_text(f"Max Tips: {state.max_branches}", PANEL_X + 10, y, 20, rl.WHITE)
+    y += 24
     rl.draw_rectangle(slider_x, y, slider_w, slider_h, rl.Color(60,60,60,255))
     t = (state.max_branches - 5) / (500 - 5)
     thumb_x = int(slider_x + t * slider_w)
     rl.draw_rectangle(thumb_x - 5, y - 2, 10, slider_h + 4, rl.Color(150,150,150,255))
-    y += slider_h + 12
+    y += slider_h + 14
 
-    rl.draw_text(f"Food Budget: {state.food_budget:.1f}", PANEL_X + 10, y, 13, rl.WHITE)
-    y += 18
+    rl.draw_text(f"Food Budget: {state.food_budget:.1f}", PANEL_X + 10, y, 20, rl.WHITE)
+    y += 24
     rl.draw_rectangle(slider_x, y, slider_w, slider_h, rl.Color(60,60,60,255))
     tf = (state.food_budget - 0.5) / (50.0 - 0.5)
     thumb_fx = int(slider_x + tf * slider_w)
     rl.draw_rectangle(thumb_fx - 5, y - 2, 10, slider_h + 4, rl.Color(200,150,50,255))
-    y += slider_h + 16
+    y += slider_h + 14
+
+    deg = math.degrees(state.branch_angle)
+    rl.draw_text(f"Branch Angle: {deg:.0f} deg", PANEL_X + 10, y, 20, rl.WHITE)
+    y += 24
+    rl.draw_rectangle(slider_x, y, slider_w, slider_h, rl.Color(60,60,60,255))
+    ta = state.branch_angle / math.pi
+    thumb_ax = int(slider_x + ta * slider_w)
+    rl.draw_rectangle(thumb_ax - 5, y - 2, 10, slider_h + 4, rl.Color(100,150,220,255))
+    y += slider_h + 14
 
     draw_button("Step Forward", PANEL_X + 10, y, CURVE_W, 30)
     y += 38
@@ -223,14 +234,14 @@ def draw_panel(state, curve, dragging_point):
     tog_col = rl.Color(68, 170, 68, 255) if state.branch_from_start else rl.Color(74, 74, 74, 255)
     rl.draw_rectangle(PANEL_X + 10, y, CURVE_W, 30, tog_col)
     label = "Branch: from Start" if state.branch_from_start else "Branch: continue Age"
-    rl.draw_text(label, PANEL_X + 18, y + 8, 13, rl.WHITE)
+    rl.draw_text(label, PANEL_X + 18, y + 6, 20, rl.WHITE)
     y += 38
 
-    rl.draw_text(f"Lifespan: {BRANCH_LIFESPAN} steps", PANEL_X + 10, y, 11, rl.Color(130,130,130,255))
+    rl.draw_text(f"Lifespan: {BRANCH_LIFESPAN} steps", PANEL_X + 10, y, 17, rl.Color(130,130,130,255))
 
 def draw_button(label, x, y, w, h):
     rl.draw_rectangle(x, y, w, h, rl.Color(74, 74, 74, 255))
-    rl.draw_text(label, x + 8, y + 8, 13, rl.WHITE)
+    rl.draw_text(label, x + 8, y + 6, 20, rl.WHITE)
 
 def draw_curve(curve, dragging_point):
     rl.draw_rectangle(CURVE_X, CURVE_Y, CURVE_W, CURVE_H, rl.Color(26, 26, 26, 255))
@@ -276,18 +287,26 @@ def handle_curve_drag(curve, dragging_point):
 
     return dragging_point
 
+def _slider_y_positions():
+    """Return (branches_y, food_y, angle_y) for slider hit areas."""
+    y = CURVE_Y + CURVE_H + 34
+    y += 24          # label
+    branches_y = y
+    y += 14 + 14     # slider + gap
+    y += 24          # label
+    food_y = y
+    y += 14 + 14
+    y += 24          # label
+    angle_y = y
+    return branches_y, food_y, angle_y
+
 def handle_sliders(state, active_slider):
     mx = rl.get_mouse_x()
     my = rl.get_mouse_y()
     slider_x = PANEL_X + 10
     slider_w = CURVE_W
 
-    y = CURVE_Y + CURVE_H + 30
-    y += 18
-    branches_y = y
-    y += 14 + 12
-    y += 18
-    food_y = y
+    branches_y, food_y, angle_y = _slider_y_positions()
 
     if rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT):
         if slider_x <= mx <= slider_x + slider_w:
@@ -295,6 +314,8 @@ def handle_sliders(state, active_slider):
                 active_slider = 'branches'
             elif food_y - 4 <= my <= food_y + 18:
                 active_slider = 'food'
+            elif angle_y - 4 <= my <= angle_y + 18:
+                active_slider = 'angle'
 
     if rl.is_mouse_button_released(rl.MouseButton.MOUSE_BUTTON_LEFT):
         active_slider = None
@@ -307,16 +328,22 @@ def handle_sliders(state, active_slider):
         t = max(0.0, min(1.0, (mx - slider_x) / slider_w))
         state.food_budget = 0.5 + t * (50.0 - 0.5)
 
+    if active_slider == 'angle' and rl.is_mouse_button_down(rl.MouseButton.MOUSE_BUTTON_LEFT):
+        t = max(0.0, min(1.0, (mx - slider_x) / slider_w))
+        state.branch_angle = t * math.pi
+
     return active_slider
+
+def _button_base_y():
+    branches_y, food_y, angle_y = _slider_y_positions()
+    y = angle_y + 14 + 14
+    return y
 
 def handle_buttons(state):
     mx = rl.get_mouse_x()
     my = rl.get_mouse_y()
 
-    y = CURVE_Y + CURVE_H + 30
-    y += 18 + 14 + 12
-    y += 18 + 14 + 16
-    btn_y = y
+    btn_y = _button_base_y()
 
     if rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT):
         if PANEL_X + 10 <= mx <= PANEL_X + 10 + CURVE_W:
