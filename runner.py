@@ -6,11 +6,9 @@ import sys
 
 SCREEN_W = 900
 SCREEN_H = 600
-SIMS_DIR = "sims"
 
-LIST_W = 260
-PREVIEW_X = LIST_W
-INFO_W = SCREEN_W - LIST_W
+LIST_W   = 260
+INFO_W   = SCREEN_W - LIST_W
 
 BG      = rl.Color(30, 30, 35, 255)
 SEL_COL = rl.Color(60, 90, 60, 255)
@@ -20,16 +18,25 @@ DIM_COL = rl.Color(120, 120, 130, 255)
 DIV_COL = rl.Color(60, 60, 70, 255)
 BTN_COL = rl.Color(50, 100, 50, 255)
 BTN_HOV = rl.Color(70, 140, 70, 255)
+CAT_COL = rl.Color(40, 40, 50, 255)
+CAT_TXT = rl.Color(160, 160, 180, 255)
 
 FS  = 24
 FSS = 21
+FSC = 18  # category label
 
-ITEM_H = 52
+ITEM_H   = 52
+CAT_H    = 32
 HEADER_H = 48
 
 BTN_W, BTN_H = 160, 44
 BTN_X = LIST_W + (INFO_W - BTN_W) // 2
 BTN_Y = SCREEN_H - BTN_H - 20
+
+PREVIEW_AREA_H = SCREEN_H // 2 - HEADER_H
+DESC_Y_START   = HEADER_H + PREVIEW_AREA_H + 12
+
+SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules"}
 
 
 def read_sim_meta(path):
@@ -55,19 +62,35 @@ def read_sim_meta(path):
     return desc
 
 
-def scan_sims():
+def scan_all():
+    """
+    Returns list of row dicts:
+      type="cat"  -> {type, label}
+      type="sim"  -> {type, name, path, desc, png}
+    Also returns flat list of sim-only dicts for indexed selection.
+    """
+    rows = []
     sims = []
-    if not os.path.isdir(SIMS_DIR):
-        return sims
-    for fname in sorted(os.listdir(SIMS_DIR)):
-        if not fname.endswith(".py"):
+    base = os.path.dirname(os.path.abspath(__file__))
+    dirs = sorted(
+        d for d in os.listdir(base)
+        if os.path.isdir(os.path.join(base, d)) and d not in SKIP_DIRS and not d.startswith(".")
+    )
+    for d in dirs:
+        folder = os.path.join(base, d)
+        files = sorted(f for f in os.listdir(folder) if f.endswith(".py"))
+        if not files:
             continue
-        name = fname[:-3]
-        path = os.path.join(SIMS_DIR, fname)
-        desc = read_sim_meta(path)
-        png  = os.path.join(SIMS_DIR, name + ".png")
-        sims.append({"name": name, "path": path, "desc": desc, "png": png})
-    return sims
+        rows.append({"type": "cat", "label": d})
+        for fname in files:
+            name = fname[:-3]
+            path = os.path.join(folder, fname)
+            desc = read_sim_meta(path)
+            png  = os.path.join(folder, name + ".png")
+            entry = {"type": "sim", "name": name, "path": path, "desc": desc, "png": png}
+            rows.append(entry)
+            sims.append(entry)
+    return rows, sims
 
 
 def wrap_text(text, max_chars):
@@ -93,21 +116,25 @@ def launch(sim_path):
     )
 
 
+def total_list_height(rows):
+    h = 0
+    for r in rows:
+        h += CAT_H if r["type"] == "cat" else ITEM_H
+    return h
+
+
 rl.init_window(SCREEN_W, SCREEN_H, "Sim Runner")
 rl.set_target_fps(60)
 
-font = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FS, None, 0)
+font   = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FS,  None, 0)
 font_s = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FSS, None, 0)
+font_c = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FSC, None, 0)
 
-sims = scan_sims()
-selected = 0
-preview_tex = None
+rows, sims = scan_all()
+selected     = 0  # index into sims[]
+preview_tex  = None
 preview_name = None
 scroll_offset = 0
-
-# preview area: top half of info panel, leaving room for text + button
-PREVIEW_AREA_H = SCREEN_H // 2 - HEADER_H
-DESC_Y_START   = HEADER_H + PREVIEW_AREA_H + 12
 
 while not rl.window_should_close():
     mouse = rl.get_mouse_position()
@@ -117,22 +144,31 @@ while not rl.window_should_close():
     if rl.is_key_pressed(rl.KeyboardKey.KEY_F5):
         if preview_tex:
             rl.unload_texture(preview_tex)
-            preview_tex = None
+            preview_tex  = None
             preview_name = None
-        sims = scan_sims()
+        rows, sims = scan_all()
         selected = min(selected, max(0, len(sims) - 1))
 
     wheel = rl.get_mouse_wheel_move()
     if mx < LIST_W and wheel != 0.0:
         scroll_offset -= int(wheel) * ITEM_H
-        max_scroll = max(0, len(sims) * ITEM_H - (SCREEN_H - HEADER_H))
+        max_scroll = max(0, total_list_height(rows) - (SCREEN_H - HEADER_H))
         scroll_offset = max(0, min(scroll_offset, max_scroll))
 
+    # click in list: map pixel -> row -> sim index
     if lmb and mx < LIST_W and my > HEADER_H:
-        idx = (int(my) - HEADER_H + scroll_offset) // ITEM_H
-        if 0 <= idx < len(sims):
-            selected = idx
+        cy = HEADER_H - scroll_offset
+        sim_idx = 0
+        for r in rows:
+            rh = CAT_H if r["type"] == "cat" else ITEM_H
+            if r["type"] == "sim":
+                if cy <= my < cy + rh:
+                    selected = sim_idx
+                    break
+                sim_idx += 1
+            cy += rh
 
+    # load preview
     if sims:
         cur = sims[selected]
         if cur["name"] != preview_name:
@@ -151,30 +187,42 @@ while not rl.window_should_close():
     rl.begin_drawing()
     rl.clear_background(BG)
 
-    # header bar
+    # header
     rl.draw_rectangle(0, 0, SCREEN_W, HEADER_H, rl.Color(40, 40, 50, 255))
-    rl.draw_text_ex(font, "SIM RUNNER", rl.Vector2(12, 10), FS, 1, TEXT_COL)
-    rl.draw_text_ex(font_s, "F5 reload", rl.Vector2(LIST_W + 12, 14), FSS, 1, DIM_COL)
+    rl.draw_text_ex(font,   "SIM RUNNER", rl.Vector2(12, 10),          FS,  1, TEXT_COL)
+    rl.draw_text_ex(font_s, "F5 reload",  rl.Vector2(LIST_W + 12, 14), FSS, 1, DIM_COL)
 
-    # divider list | info
     rl.draw_rectangle(LIST_W - 1, 0, 1, SCREEN_H, DIV_COL)
 
     # --- list ---
     rl.begin_scissor_mode(0, HEADER_H, LIST_W, SCREEN_H - HEADER_H)
-    for i, s in enumerate(sims):
-        iy = HEADER_H + i * ITEM_H - scroll_offset
-        if iy + ITEM_H < HEADER_H or iy > SCREEN_H:
-            continue
-        if i == selected:
-            rl.draw_rectangle(0, iy, LIST_W - 1, ITEM_H, SEL_COL)
-        elif 0 <= mx < LIST_W and iy <= my <= iy + ITEM_H:
-            rl.draw_rectangle(0, iy, LIST_W - 1, ITEM_H, HOV_COL)
-        rl.draw_text_ex(font, s["name"], rl.Vector2(10, iy + (ITEM_H - FS) // 2), FS, 1, TEXT_COL)
-        rl.draw_rectangle(0, iy + ITEM_H - 1, LIST_W - 1, 1, DIV_COL)
+    cy = HEADER_H - scroll_offset
+    sim_idx = 0
+    for r in rows:
+        if r["type"] == "cat":
+            rh = CAT_H
+            if cy + rh >= HEADER_H and cy <= SCREEN_H:
+                rl.draw_rectangle(0, cy, LIST_W - 1, rh, CAT_COL)
+                rl.draw_text_ex(font_c, r["label"].upper(),
+                                rl.Vector2(8, cy + (rh - FSC) // 2), FSC, 1, CAT_TXT)
+                rl.draw_rectangle(0, cy + rh - 1, LIST_W - 1, 1, DIV_COL)
+            cy += rh
+        else:
+            rh = ITEM_H
+            if cy + rh >= HEADER_H and cy <= SCREEN_H:
+                if sim_idx == selected:
+                    rl.draw_rectangle(0, cy, LIST_W - 1, rh, SEL_COL)
+                elif 0 <= mx < LIST_W and cy <= my < cy + rh:
+                    rl.draw_rectangle(0, cy, LIST_W - 1, rh, HOV_COL)
+                rl.draw_text_ex(font, r["name"],
+                                rl.Vector2(18, cy + (rh - FS) // 2), FS, 1, TEXT_COL)
+                rl.draw_rectangle(0, cy + rh - 1, LIST_W - 1, 1, DIV_COL)
+            cy += rh
+            sim_idx += 1
     rl.end_scissor_mode()
 
-    # --- info panel: image top, text below ---
-    pad = 12
+    # --- info panel ---
+    pad   = 12
     img_x = LIST_W + pad
     img_y = HEADER_H + pad
     img_w = INFO_W - pad * 2
@@ -199,13 +247,10 @@ while not rl.window_should_close():
         )
     else:
         rl.draw_text_ex(font_s, "no preview",
-                        rl.Vector2(LIST_W + pad, img_y + img_h // 2),
-                        FSS, 1, DIM_COL)
+                        rl.Vector2(LIST_W + pad, img_y + img_h // 2), FSS, 1, DIM_COL)
 
-    # divider image | desc
     rl.draw_rectangle(LIST_W, HEADER_H + PREVIEW_AREA_H, INFO_W, 1, DIV_COL)
 
-    # description text
     if sims:
         desc = sims[selected]["desc"] or "No description."
         chars_per_line = max(10, (INFO_W - pad * 2) // (FSS // 2 + 2))
@@ -217,18 +262,17 @@ while not rl.window_should_close():
             rl.draw_text_ex(font_s, line, rl.Vector2(LIST_W + pad, ty), FSS, 1, TEXT_COL)
             ty += FSS + 6
 
-    # run button
     if sims:
-        bc = BTN_HOV if btn_hov else BTN_COL
+        bc  = BTN_HOV if btn_hov else BTN_COL
         rl.draw_rectangle(BTN_X, BTN_Y, BTN_W, BTN_H, bc)
-        lbl = "RUN"
+        lbl   = "RUN"
         lbl_w = rl.measure_text_ex(font, lbl, FS, 1).x
         rl.draw_text_ex(font, lbl,
                         rl.Vector2(BTN_X + (BTN_W - lbl_w) // 2, BTN_Y + (BTN_H - FS) // 2),
                         FS, 1, TEXT_COL)
 
     if not sims:
-        rl.draw_text_ex(font_s, f"No sims found in '{SIMS_DIR}/'",
+        rl.draw_text_ex(font_s, "No sims found.",
                         rl.Vector2(LIST_W + 20, SCREEN_H // 2), FSS, 1, DIM_COL)
 
     rl.end_drawing()
@@ -237,4 +281,5 @@ if preview_tex:
     rl.unload_texture(preview_tex)
 rl.unload_font(font)
 rl.unload_font(font_s)
+rl.unload_font(font_c)
 rl.close_window()
