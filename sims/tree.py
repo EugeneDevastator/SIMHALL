@@ -3,9 +3,7 @@ Tree simulator with progressively growing tree segment and branch-inherited grow
 """
 import pyray as rl
 import math
-import ctypes
 
-# --- Constants ---
 SCREEN_W = 1100
 SCREEN_H = 600
 TREE_W = 800
@@ -19,8 +17,8 @@ CURVE_X = PANEL_X + 10
 CURVE_Y = 60
 CURVE_W = 260
 CURVE_H = 160
+BRANCH_LIFESPAN = 120  # steps before endpoint is considered "old" (age_ratio=1)
 
-# --- Data Structures ---
 class Node:
     __slots__ = ('x','y','id','is_endpoint','is_root','branch_accumulator','branch_side','birth_time')
     def __init__(self, x, y, nid, is_endpoint=False, is_root=False, birth_time=0):
@@ -50,7 +48,8 @@ class TreeState:
         self.max_branches = 50
         self.growing = False
         self.grow_timer = 0.0
-        self.grow_interval = 0.1  # seconds
+        self.grow_interval = 0.1
+        self.branch_from_start = False
 
     def node_by_id(self, nid):
         for n in self.nodes:
@@ -58,7 +57,6 @@ class TreeState:
                 return n
         return None
 
-# --- Tree Management ---
 def tree_init(state):
     state.nodes.clear()
     state.edges.clear()
@@ -75,6 +73,7 @@ def tree_init(state):
     state.edges.append(Edge(root.id, tip.id, 0.0))
 
 def tree_get_branch_rate(curve, age_ratio):
+    # raw curve value 0..1, bottom=zero rate, top=max rate. No offset.
     for i in range(len(curve) - 1):
         if curve[i][0] <= age_ratio <= curve[i+1][0]:
             t = (age_ratio - curve[i][0]) / (curve[i+1][0] - curve[i][0])
@@ -84,13 +83,11 @@ def tree_get_branch_rate(curve, age_ratio):
 def tree_step(state, curve):
     state.global_time += 1
 
-    if len(state.nodes) >= state.max_branches:
-        return
-
-    # Build lookup
     node_map = {n.id: n for n in state.nodes}
 
-    # Move non-endpoint, non-root children along their edge direction
+    # count current endpoints for branch limit
+    endpoint_count = sum(1 for n in state.nodes if n.is_endpoint)
+
     for edge in state.edges:
         parent = node_map.get(edge.from_id)
         child = node_map.get(edge.to_id)
@@ -103,9 +100,7 @@ def tree_step(state, curve):
         child.x += dx
         child.y += dy
 
-    # Build parent-edge lookup for endpoints
     to_edge = {e.to_id: e for e in state.edges}
-
     endpoints = [n for n in state.nodes if n.is_endpoint]
     new_nodes = []
     new_edges = []
@@ -124,21 +119,24 @@ def tree_step(state, curve):
             state.max_height = height
 
         age = state.global_time - ep.birth_time
-        age_ratio = min(1.0, age / state.global_time) if state.global_time > 0 else 0.0
+        age_ratio = min(1.0, age / BRANCH_LIFESPAN)
         rate = tree_get_branch_rate(curve, age_ratio)
         ep.branch_accumulator += rate
 
-        total = len(state.nodes) + len(new_nodes)
-        if total < state.max_branches and ep.branch_accumulator >= 1.0 and ep.y > 50:
+        # branch limit: count existing + pending new pairs
+        pending_pairs = len(new_nodes) // 2
+        if ep.branch_accumulator >= 1.0 and ep.y > 50 and (endpoint_count + pending_pairs * 2) < state.max_branches:
             ep.branch_accumulator -= 1.0
             ep.is_endpoint = False
 
             main_angle = angle + ep.branch_side * MAIN_DEFLECTION
-            branch_angle = angle + ep.branch_side * BRANCH_ANGLE
+            branch_angle_val = angle + ep.branch_side * BRANCH_ANGLE
 
-            mn = Node(ep.x, ep.y, state.node_id_counter, True, False, state.global_time)
+            child_birth = 0 if state.branch_from_start else state.global_time
+
+            mn = Node(ep.x, ep.y, state.node_id_counter, True, False, child_birth)
             state.node_id_counter += 1
-            bn = Node(ep.x, ep.y, state.node_id_counter, True, False, state.global_time)
+            bn = Node(ep.x, ep.y, state.node_id_counter, True, False, child_birth)
             state.node_id_counter += 1
 
             mn.branch_side = ep.branch_side * -1
@@ -147,29 +145,21 @@ def tree_step(state, curve):
             new_nodes.append(mn)
             new_nodes.append(bn)
             new_edges.append(Edge(ep.id, mn.id, main_angle))
-            new_edges.append(Edge(ep.id, bn.id, branch_angle))
-
-            if len(state.nodes) + len(new_nodes) >= state.max_branches:
-                break
+            new_edges.append(Edge(ep.id, bn.id, branch_angle_val))
 
     state.nodes.extend(new_nodes)
     state.edges.extend(new_edges)
 
-# --- Rendering ---
 def draw_tree(state):
-    # Background
     rl.draw_rectangle(0, 0, TREE_W, TREE_H, rl.Color(10, 10, 10, 255))
-
     node_map = {n.id: n for n in state.nodes}
 
-    # Edges
     for edge in state.edges:
         a = node_map.get(edge.from_id)
         b = node_map.get(edge.to_id)
         if a and b:
             rl.draw_line(int(a.x), int(a.y), int(b.x), int(b.y), rl.Color(139, 69, 19, 255))
 
-    # Nodes
     for n in state.nodes:
         if n.is_root:
             rl.draw_circle(int(n.x), int(n.y), 5, rl.Color(170, 68, 68, 255))
@@ -181,68 +171,69 @@ def draw_tree(state):
 def draw_panel(state, curve, dragging_point):
     rl.draw_rectangle(PANEL_X, 0, PANEL_W, SCREEN_H, rl.Color(42, 42, 42, 255))
 
-    # Title
     rl.draw_text("Branching Rate Curve", PANEL_X + 10, 10, 14, rl.WHITE)
-    rl.draw_text("Edge Age vs Spawn Rate", PANEL_X + 10, 30, 11, rl.Color(170,170,170,255))
+    rl.draw_text("Age ratio vs Spawn Rate  (top=high)", PANEL_X + 10, 30, 11, rl.Color(170,170,170,255))
 
     draw_curve(curve, dragging_point)
 
-    # Stats
-    branch_count = len(state.nodes)
+    endpoint_count = sum(1 for n in state.nodes if n.is_endpoint)
     height_m = state.max_height / 100.0
-    stats = f"Branches: {branch_count}  Height: {height_m:.2f}m"
+    stats = f"Tips: {endpoint_count}  Height: {height_m:.2f}m"
     rl.draw_text(stats, PANEL_X + 10, CURVE_Y + CURVE_H + 10, 12, rl.Color(170,170,170,255))
 
-    # Max branches label
-    rl.draw_text(f"Max Branches: {state.max_branches}", PANEL_X + 10, CURVE_Y + CURVE_H + 30, 13, rl.WHITE)
+    rl.draw_text(f"Max Tips: {state.max_branches}", PANEL_X + 10, CURVE_Y + CURVE_H + 30, 13, rl.WHITE)
 
-    # Slider bar (manual)
     slider_x = PANEL_X + 10
     slider_y = CURVE_Y + CURVE_H + 50
     slider_w = CURVE_W
     slider_h = 14
     rl.draw_rectangle(slider_x, slider_y, slider_w, slider_h, rl.Color(60,60,60,255))
-    t = (state.max_branches - 5) / (200 - 5)
+    t = (state.max_branches - 5) / (500 - 5)
     thumb_x = int(slider_x + t * slider_w)
     rl.draw_rectangle(thumb_x - 5, slider_y - 2, 10, slider_h + 4, rl.Color(150,150,150,255))
 
-    # Buttons
     btn_y = slider_y + 30
     draw_button("Step Forward", PANEL_X + 10, btn_y, CURVE_W, 30)
-    draw_button("Auto Grow" if not state.growing else "Stop", PANEL_X + 10, btn_y + 38, CURVE_W, 30)
+
+    auto_label = "Pause" if state.growing else "Auto Grow"
+    draw_button(auto_label, PANEL_X + 10, btn_y + 38, CURVE_W, 30)
     draw_button("Reset", PANEL_X + 10, btn_y + 76, CURVE_W, 30)
+
+    toggle_y = btn_y + 120
+    tog_col = rl.Color(68, 170, 68, 255) if state.branch_from_start else rl.Color(74, 74, 74, 255)
+    rl.draw_rectangle(PANEL_X + 10, toggle_y, CURVE_W, 30, tog_col)
+    label = "Branch: from Start" if state.branch_from_start else "Branch: continue Age"
+    rl.draw_text(label, PANEL_X + 18, toggle_y + 8, 13, rl.WHITE)
+
+    # lifespan info
+    rl.draw_text(f"Lifespan: {BRANCH_LIFESPAN} steps", PANEL_X + 10, toggle_y + 38, 11, rl.Color(130,130,130,255))
 
 def draw_button(label, x, y, w, h):
     rl.draw_rectangle(x, y, w, h, rl.Color(74, 74, 74, 255))
     rl.draw_text(label, x + 8, y + 8, 13, rl.WHITE)
 
 def draw_curve(curve, dragging_point):
-    # Background
     rl.draw_rectangle(CURVE_X, CURVE_Y, CURVE_W, CURVE_H, rl.Color(26, 26, 26, 255))
 
-    # Grid
     for i in range(11):
         gx = CURVE_X + int(i / 10 * CURVE_W)
         gy = CURVE_Y + int(i / 10 * CURVE_H)
         rl.draw_line(gx, CURVE_Y, gx, CURVE_Y + CURVE_H, rl.Color(68,68,68,255))
         rl.draw_line(CURVE_X, gy, CURVE_X + CURVE_W, gy, rl.Color(68,68,68,255))
 
-    # Curve line
     for i in range(len(curve) - 1):
         ax = CURVE_X + int(curve[i][0] * CURVE_W)
-        ay = CURVE_Y + int(curve[i][1] * CURVE_H)
+        ay = CURVE_Y + int((1.0 - curve[i][1]) * CURVE_H)
         bx = CURVE_X + int(curve[i+1][0] * CURVE_W)
-        by = CURVE_Y + int(curve[i+1][1] * CURVE_H)
+        by = CURVE_Y + int((1.0 - curve[i+1][1]) * CURVE_H)
         rl.draw_line(ax, ay, bx, by, rl.Color(68, 170, 68, 255))
 
-    # Points
     for i, pt in enumerate(curve):
         px = CURVE_X + int(pt[0] * CURVE_W)
-        py = CURVE_Y + int(pt[1] * CURVE_H)
+        py = CURVE_Y + int((1.0 - pt[1]) * CURVE_H)
         col = rl.Color(68, 170, 255, 255) if i != dragging_point else rl.Color(255, 200, 50, 255)
         rl.draw_circle(px, py, 6, col)
 
-# --- Input Handling ---
 def handle_curve_drag(curve, dragging_point):
     mx = rl.get_mouse_x()
     my = rl.get_mouse_y()
@@ -250,7 +241,7 @@ def handle_curve_drag(curve, dragging_point):
     if rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT):
         for i, pt in enumerate(curve):
             px = CURVE_X + int(pt[0] * CURVE_W)
-            py = CURVE_Y + int(pt[1] * CURVE_H)
+            py = CURVE_Y + int((1.0 - pt[1]) * CURVE_H)
             dist = math.sqrt((px - mx)**2 + (py - my)**2)
             if dist < 10:
                 return i
@@ -259,7 +250,7 @@ def handle_curve_drag(curve, dragging_point):
         return None
 
     if dragging_point is not None:
-        rel_y = (my - CURVE_Y) / CURVE_H
+        rel_y = 1.0 - (my - CURVE_Y) / CURVE_H
         rel_y = max(0.0, min(1.0, rel_y))
         curve[dragging_point] = (curve[dragging_point][0], rel_y)
 
@@ -277,12 +268,13 @@ def handle_slider(state):
         if slider_x <= mx <= slider_x + slider_w and slider_y - 4 <= my <= slider_y + slider_h + 4:
             t = (mx - slider_x) / slider_w
             t = max(0.0, min(1.0, t))
-            state.max_branches = int(5 + t * (200 - 5))
+            state.max_branches = int(5 + t * (500 - 5))
 
 def handle_buttons(state):
     mx = rl.get_mouse_x()
     my = rl.get_mouse_y()
-    btn_y = CURVE_Y + CURVE_H + 80
+    slider_y = CURVE_Y + CURVE_H + 50
+    btn_y = slider_y + 30
 
     if rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT):
         if PANEL_X + 10 <= mx <= PANEL_X + 10 + CURVE_W:
@@ -292,19 +284,20 @@ def handle_buttons(state):
                 return 'auto'
             if btn_y + 76 <= my <= btn_y + 106:
                 return 'reset'
+            if btn_y + 120 <= my <= btn_y + 150:
+                return 'toggle_branch'
     return None
 
-# --- Main ---
 def main():
     rl.init_window(SCREEN_W, SCREEN_H, "Tree Generator 2D")
     rl.set_target_fps(60)
 
     curve = [
-        (0.0,  0.98),
-        (0.25, 0.85),
-        (0.5,  0.88),
-        (0.75, 0.92),
-        (1.0,  0.99),
+        (0.0,  0.05),
+        (0.25, 0.2),
+        (0.5,  0.4),
+        (0.75, 0.6),
+        (1.0,  0.3),
     ]
 
     state = TreeState()
@@ -314,15 +307,11 @@ def main():
     while not rl.window_should_close():
         dt = rl.get_frame_time()
 
-        # Auto grow timer
         if state.growing:
             state.grow_timer += dt
             if state.grow_timer >= state.grow_interval:
                 state.grow_timer = 0.0
-                if len(state.nodes) < state.max_branches:
-                    tree_step(state, curve)
-                else:
-                    state.growing = False
+                tree_step(state, curve)
 
         dragging_point = handle_curve_drag(curve, dragging_point)
         handle_slider(state)
@@ -336,6 +325,8 @@ def main():
         elif action == 'reset':
             state.growing = False
             tree_init(state)
+        elif action == 'toggle_branch':
+            state.branch_from_start = not state.branch_from_start
 
         rl.begin_drawing()
         rl.clear_background(rl.Color(26, 26, 26, 255))
