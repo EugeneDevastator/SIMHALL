@@ -13,16 +13,17 @@ HOVER_R = 18.0
 MIN_THICK = 4.0
 MAX_THICK = 60.0
 THICK_STEP = 2.0
-SEGMENTS = 120
+SEGMENTS = 12
 OUTLINE_PAD = 6.0
-DEFAULT_THICK = 18.0
+DEFAULT_THICK = 48.0
+CIRCLE_STEPS = 6
 
 ROPE_COLORS = [
-    rl.Color(210, 100,  20, 255),
-    rl.Color( 20, 150,  40, 255),
-    rl.Color( 30,  80, 200, 255),
-    rl.Color(160,  30, 160, 255),
-    rl.Color(180, 160,  10, 255),
+    (rl.Color(210, 100,  20, 255), rl.Color(220, 210,  30, 255)),
+    (rl.Color( 20, 150,  40, 255), rl.Color( 30,  80, 200, 255)),
+    (rl.Color( 30,  80, 200, 255), rl.Color(160,  30, 160, 255)),
+    (rl.Color(160,  30, 160, 255), rl.Color(210, 100,  20, 255)),
+    (rl.Color(180, 160,  10, 255), rl.Color( 20, 150,  40, 255)),
 ]
 
 Z_DARK  = 0.45
@@ -32,7 +33,7 @@ Z_MAX   =  4
 CAM_Z   = 100.0
 
 def screen_to_world(sx, sy):
-    return (sx - SCREEN_W * 0.5+100, -(sy - SCREEN_H * 0.5))
+    return (sx - SCREEN_W * 0.5, -(sy - SCREEN_H * 0.5))
 
 def z_tint(base_color, z):
     t = (z - Z_MIN) / max(Z_MAX - Z_MIN, 1)
@@ -42,6 +43,14 @@ def z_tint(base_color, z):
         int(max(0, min(255, base_color.r * f))),
         int(max(0, min(255, base_color.g * f))),
         int(max(0, min(255, base_color.b * f))),
+        255
+    )
+
+def lerp_color(c0, c1, t):
+    return rl.Color(
+        int(c0.r + (c1.r - c0.r) * t),
+        int(c0.g + (c1.g - c0.g) * t),
+        int(c0.b + (c1.b - c0.b) * t),
         255
     )
 
@@ -72,15 +81,19 @@ def build_segments(pts):
         return []
     xy = [(p[0], p[1]) for p in pts]
     bezier_segs = catmull_to_bezier(xy)
+    n_segs = len(bezier_segs)
     result = []
     for i, seg in enumerate(bezier_segs):
         z0 = pts[i][2]
         z1 = pts[i+1][2]
+        # global t range for color lerp
+        gt0 = i / n_segs
+        gt1 = (i + 1) / n_segs
         poly = []
         for j in range(SEGMENTS):
             poly.append(eval_cubic(seg, j / SEGMENTS))
         poly.append(seg[3])
-        result.append((poly, z0, z1))
+        result.append((poly, z0, z1, gt0, gt1))
     return result
 
 def seg_normal(ax, ay, bx, by):
@@ -110,7 +123,7 @@ def build_poly_and_normals(poly):
         vnorm[i] = (mx/ln, my/ln) if ln > 1e-9 else (nx0, ny0)
     return poly, vnorm
 
-def draw_strip_3d(poly, vnorm, half, base_color, z0, z1, is_outline):
+def draw_strip_3d(poly, vnorm, half, color0, color1, z0, z1, gt0, gt1, is_outline):
     n = len(poly)
     if n < 2:
         return
@@ -121,11 +134,18 @@ def draw_strip_3d(poly, vnorm, half, base_color, z0, z1, is_outline):
         t1 = (i + 1) / total
         z_a = z0 + (z1 - z0) * t0
         z_b = z0 + (z1 - z0) * t1
+        gt_a = gt0 + (gt1 - gt0) * t0
+        gt_b = gt0 + (gt1 - gt0) * t1
+
         if is_outline:
-            col = OUTLINE_COL
+            col_a = OUTLINE_COL
+            col_b = OUTLINE_COL
             za, zb = z_a - 0.15, z_b - 0.15
         else:
-            col = z_tint(base_color, (z_a + z_b) * 0.5)
+            base_a = lerp_color(color0, color1, gt_a)
+            base_b = lerp_color(color0, color1, gt_b)
+            col_a = z_tint(base_a, (z_a + z_b) * 0.5)
+            col_b = z_tint(base_b, (z_a + z_b) * 0.5)
             za, zb = z_a, z_b
 
         ax, ay = poly[i]
@@ -138,34 +158,39 @@ def draw_strip_3d(poly, vnorm, half, base_color, z0, z1, is_outline):
         l1x, l1y = bx + nx1*half, by + ny1*half
         r1x, r1y = bx - nx1*half, by - ny1*half
 
-        rl.rl_color4ub(col.r, col.g, col.b, col.a)
+        rl.rl_color4ub(col_a.r, col_a.g, col_a.b, col_a.a)
         rl.rl_vertex3f(l0x, l0y, za)
+        rl.rl_color4ub(col_a.r, col_a.g, col_a.b, col_a.a)
         rl.rl_vertex3f(r0x, r0y, za)
+        rl.rl_color4ub(col_b.r, col_b.g, col_b.b, col_b.a)
         rl.rl_vertex3f(l1x, l1y, zb)
+        rl.rl_color4ub(col_a.r, col_a.g, col_a.b, col_a.a)
         rl.rl_vertex3f(r0x, r0y, za)
+        rl.rl_color4ub(col_b.r, col_b.g, col_b.b, col_b.a)
         rl.rl_vertex3f(r1x, r1y, zb)
+        rl.rl_color4ub(col_b.r, col_b.g, col_b.b, col_b.a)
         rl.rl_vertex3f(l1x, l1y, zb)
     rl.rl_end()
 
 def draw_point_3d(wx, wy, pz, radius, col):
-    r = radius
+    # filled circle via triangle fan
     rl.rl_begin(rl.RL_TRIANGLES)
     rl.rl_color4ub(col.r, col.g, col.b, col.a)
-    rl.rl_vertex3f(wx - r, wy - r, pz)
-    rl.rl_vertex3f(wx + r, wy - r, pz)
-    rl.rl_vertex3f(wx + r, wy + r, pz)
-    rl.rl_vertex3f(wx - r, wy - r, pz)
-    rl.rl_vertex3f(wx + r, wy + r, pz)
-    rl.rl_vertex3f(wx - r, wy + r, pz)
+    for k in range(CIRCLE_STEPS):
+        a0 = 2.0 * math.pi * k / CIRCLE_STEPS
+        a1 = 2.0 * math.pi * (k + 1) / CIRCLE_STEPS
+        rl.rl_vertex3f(wx, wy, pz)
+        rl.rl_vertex3f(wx + math.cos(a0) * radius, wy + math.sin(a0) * radius, pz)
+        rl.rl_vertex3f(wx + math.cos(a1) * radius, wy + math.sin(a1) * radius, pz)
     rl.rl_end()
+    # outline ring
     rl.rl_begin(rl.RL_LINES)
     rl.rl_color4ub(OUTLINE_COL.r, OUTLINE_COL.g, OUTLINE_COL.b, OUTLINE_COL.a)
-    steps = 16
-    for k in range(steps):
-        a0 = 2*math.pi * k / steps
-        a1 = 2*math.pi * (k+1) / steps
-        rl.rl_vertex3f(wx + math.cos(a0)*r, wy + math.sin(a0)*r, pz + 0.01)
-        rl.rl_vertex3f(wx + math.cos(a1)*r, wy + math.sin(a1)*r, pz + 0.01)
+    for k in range(CIRCLE_STEPS):
+        a0 = 2.0 * math.pi * k / CIRCLE_STEPS
+        a1 = 2.0 * math.pi * (k + 1) / CIRCLE_STEPS
+        rl.rl_vertex3f(wx + math.cos(a0) * radius, wy + math.sin(a0) * radius, pz + 0.01)
+        rl.rl_vertex3f(wx + math.cos(a1) * radius, wy + math.sin(a1) * radius, pz + 0.01)
     rl.rl_end()
 
 def nearest_pt(pts, wx, wy):
@@ -230,11 +255,15 @@ def rebuild(splines):
     fp = [full_poly(s['pts']) for s in splines]
     draw_segs = []
     for si, s in enumerate(splines):
-        for poly, z0, z1 in build_segments(s['pts']):
+        for poly, z0, z1, gt0, gt1 in build_segments(s['pts']):
             wpoly, vnorm = build_poly_and_normals(poly)
-            draw_segs.append({'wpoly': wpoly, 'vnorm': vnorm,
-                              'z0': z0, 'z1': z1,
-                              'si': si, 'thick': s['thick'], 'color': s['color']})
+            draw_segs.append({
+                'wpoly': wpoly, 'vnorm': vnorm,
+                'z0': z0, 'z1': z1,
+                'gt0': gt0, 'gt1': gt1,
+                'si': si, 'thick': s['thick'],
+                'color': s['color'], 'color2': s['color2']
+            })
     return fp, draw_segs
 
 def is_endpoint(pts, pi):
@@ -256,14 +285,13 @@ def main():
 
     camera = make_camera()
 
-    # pts stored in WORLD space (x right, y up, origin center)
     splines = [
         {'pts': [screen_to_world(400,400)+(0,), screen_to_world(700,300)+(1,),
                  screen_to_world(1000,500)+(0,), screen_to_world(1300,400)+(0,)],
-         'color': ROPE_COLORS[0], 'thick': DEFAULT_THICK},
+         'color': ROPE_COLORS[0][0], 'color2': ROPE_COLORS[0][1], 'thick': DEFAULT_THICK},
         {'pts': [screen_to_world(400,600)+(0,), screen_to_world(700,700)+(0,),
                  screen_to_world(1000,500)+(1,), screen_to_world(1300,650)+(0,)],
-         'color': ROPE_COLORS[1], 'thick': DEFAULT_THICK},
+         'color': ROPE_COLORS[1][0], 'color2': ROPE_COLORS[1][1], 'thick': DEFAULT_THICK},
     ]
 
     full_polys, draw_segs = rebuild(splines)
@@ -277,7 +305,6 @@ def main():
     while not rl.window_should_close():
         msx = float(rl.get_mouse_x())
         msy = float(rl.get_mouse_y())
-        # convert mouse to world space once — all hit-testing uses world coords
         mx, my = screen_to_world(msx, msy)
         shift = rl.is_key_down(rl.KEY_LEFT_SHIFT) or rl.is_key_down(rl.KEY_RIGHT_SHIFT)
 
@@ -346,7 +373,6 @@ def main():
             extend_active = False
 
         if drag_s >= 0:
-            # delta is in screen pixels; y must be flipped for world space
             delta = rl.get_mouse_delta()
             p = splines[drag_s]['pts'][drag_p]
             splines[drag_s]['pts'][drag_p] = (p[0] + delta.x, p[1] - delta.y, p[2])
@@ -374,17 +400,21 @@ def main():
             half_out = seg['thick'] * 0.5 + OUTLINE_PAD
             half_in  = seg['thick'] * 0.5
             draw_strip_3d(seg['wpoly'], seg['vnorm'], half_out,
-                          seg['color'], seg['z0'], seg['z1'], True)
+                          seg['color'], seg['color2'],
+                          seg['z0'], seg['z1'], seg['gt0'], seg['gt1'], True)
             draw_strip_3d(seg['wpoly'], seg['vnorm'], half_in,
-                          seg['color'], seg['z0'], seg['z1'], False)
+                          seg['color'], seg['color2'],
+                          seg['z0'], seg['z1'], seg['gt0'], seg['gt1'], False)
 
         for si, sp in enumerate(splines):
-            pt_col = lighten(sp['color'], 80)
             for pi, p in enumerate(sp['pts']):
                 wx, wy, pz = p
                 is_end = is_endpoint(sp['pts'], pi)
                 r = HOVER_R * 1.4 if (si == drag_s and pi == drag_p) else HOVER_R
-                fill = lighten(pt_col, 40) if is_end else pt_col
+                # pick color from gradient position
+                gt = 0.0 if len(sp['pts']) <= 1 else pi / (len(sp['pts']) - 1)
+                base = lerp_color(sp['color'], sp['color2'], gt)
+                fill = lighten(base, 60) if is_end else lighten(base, 20)
                 draw_point_3d(wx, wy, pz + 0.5, r, fill)
 
         rl.end_mode_3d()
