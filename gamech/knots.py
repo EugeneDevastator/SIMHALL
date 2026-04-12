@@ -76,26 +76,6 @@ def eval_cubic(seg, t):
     y = mt**3*p0[1] + 3*mt**2*t*c1[1] + 3*mt*t**2*c2[1] + t**3*p1[1]
     return (x, y)
 
-def build_segments(pts):
-    if len(pts) < 2:
-        return []
-    xy = [(p[0], p[1]) for p in pts]
-    bezier_segs = catmull_to_bezier(xy)
-    n_segs = len(bezier_segs)
-    result = []
-    for i, seg in enumerate(bezier_segs):
-        z0 = pts[i][2]
-        z1 = pts[i+1][2]
-        # global t range for color lerp
-        gt0 = i / n_segs
-        gt1 = (i + 1) / n_segs
-        poly = []
-        for j in range(SEGMENTS):
-            poly.append(eval_cubic(seg, j / SEGMENTS))
-        poly.append(seg[3])
-        result.append((poly, z0, z1, gt0, gt1))
-    return result
-
 def seg_normal(ax, ay, bx, by):
     dx, dy = bx - ax, by - ay
     ln = math.hypot(dx, dy)
@@ -103,15 +83,42 @@ def seg_normal(ax, ay, bx, by):
         return 0.0, 1.0
     return -dy / ln, dx / ln
 
-def build_poly_and_normals(poly):
-    n = len(poly)
-    if n < 2:
-        return poly, []
+# Returns one flat strip for the whole spline:
+# list of (x, y, z, gt) per vertex, plus averaged normals
+def build_full_strip(pts):
+    if len(pts) < 2:
+        return [], []
+    n_pts = len(pts)
+    xy = [(p[0], p[1]) for p in pts]
+    bezier_segs = catmull_to_bezier(xy)
+    n_segs = len(bezier_segs)
+
+    # sample all points with z and gt
+    verts = []  # (x, y, z, gt)
+    for i, seg in enumerate(bezier_segs):
+        z0 = pts[i][2]
+        z1 = pts[i+1][2]
+        gt0 = i / n_segs
+        gt1 = (i + 1) / n_segs
+        for j in range(SEGMENTS):
+            t = j / SEGMENTS
+            x, y = eval_cubic(seg, t)
+            z = z0 + (z1 - z0) * t
+            gt = gt0 + (gt1 - gt0) * t
+            verts.append((x, y, z, gt))
+    # last point
+    last_seg = bezier_segs[-1]
+    verts.append((last_seg[3][0], last_seg[3][1], pts[-1][2], 1.0))
+
+    n = len(verts)
+    # compute per-segment normals
     seg_norms = []
     for i in range(n - 1):
-        ax, ay = poly[i]
-        bx, by = poly[i+1]
+        ax, ay = verts[i][0], verts[i][1]
+        bx, by = verts[i+1][0], verts[i+1][1]
         seg_norms.append(seg_normal(ax, ay, bx, by))
+
+    # average normals at each vertex
     vnorm = [None] * n
     vnorm[0] = seg_norms[0]
     vnorm[n-1] = seg_norms[-1]
@@ -121,42 +128,36 @@ def build_poly_and_normals(poly):
         mx, my = (nx0+nx1)*0.5, (ny0+ny1)*0.5
         ln = math.hypot(mx, my)
         vnorm[i] = (mx/ln, my/ln) if ln > 1e-9 else (nx0, ny0)
-    return poly, vnorm
 
-def draw_strip_3d(poly, vnorm, half, color0, color1, z0, z1, gt0, gt1, is_outline):
-    n = len(poly)
+    return verts, vnorm
+
+def draw_strip_3d(verts, vnorm, half, color0, color1, is_outline):
+    n = len(verts)
     if n < 2:
         return
     total = n - 1
     rl.rl_begin(rl.RL_TRIANGLES)
     for i in range(total):
-        t0 = i / total
-        t1 = (i + 1) / total
-        z_a = z0 + (z1 - z0) * t0
-        z_b = z0 + (z1 - z0) * t1
-        gt_a = gt0 + (gt1 - gt0) * t0
-        gt_b = gt0 + (gt1 - gt0) * t1
+        x0, y0, z0, gt0 = verts[i]
+        x1, y1, z1, gt1 = verts[i+1]
+        nx0, ny0 = vnorm[i]
+        nx1, ny1 = vnorm[i+1]
 
         if is_outline:
             col_a = OUTLINE_COL
             col_b = OUTLINE_COL
-            za, zb = z_a - 0.15, z_b - 0.15
+            za, zb = z0 - 0.15, z1 - 0.15
         else:
-            base_a = lerp_color(color0, color1, gt_a)
-            base_b = lerp_color(color0, color1, gt_b)
-            col_a = z_tint(base_a, (z_a + z_b) * 0.5)
-            col_b = z_tint(base_b, (z_a + z_b) * 0.5)
-            za, zb = z_a, z_b
+            base_a = lerp_color(color0, color1, gt0)
+            base_b = lerp_color(color0, color1, gt1)
+            col_a = z_tint(base_a, (z0 + z1) * 0.5)
+            col_b = z_tint(base_b, (z0 + z1) * 0.5)
+            za, zb = z0, z1
 
-        ax, ay = poly[i]
-        bx, by = poly[i+1]
-        nx0, ny0 = vnorm[i]
-        nx1, ny1 = vnorm[i+1]
-
-        l0x, l0y = ax + nx0*half, ay + ny0*half
-        r0x, r0y = ax - nx0*half, ay - ny0*half
-        l1x, l1y = bx + nx1*half, by + ny1*half
-        r1x, r1y = bx - nx1*half, by - ny1*half
+        l0x, l0y = x0 + nx0*half, y0 + ny0*half
+        r0x, r0y = x0 - nx0*half, y0 - ny0*half
+        l1x, l1y = x1 + nx1*half, y1 + ny1*half
+        r1x, r1y = x1 - nx1*half, y1 - ny1*half
 
         rl.rl_color4ub(col_a.r, col_a.g, col_a.b, col_a.a)
         rl.rl_vertex3f(l0x, l0y, za)
@@ -173,7 +174,6 @@ def draw_strip_3d(poly, vnorm, half, color0, color1, z0, z1, gt0, gt1, is_outlin
     rl.rl_end()
 
 def draw_point_3d(wx, wy, pz, radius, col):
-    # filled circle via triangle fan
     rl.rl_begin(rl.RL_TRIANGLES)
     rl.rl_color4ub(col.r, col.g, col.b, col.a)
     for k in range(CIRCLE_STEPS):
@@ -183,7 +183,6 @@ def draw_point_3d(wx, wy, pz, radius, col):
         rl.rl_vertex3f(wx + math.cos(a0) * radius, wy + math.sin(a0) * radius, pz)
         rl.rl_vertex3f(wx + math.cos(a1) * radius, wy + math.sin(a1) * radius, pz)
     rl.rl_end()
-    # outline ring
     rl.rl_begin(rl.RL_LINES)
     rl.rl_color4ub(OUTLINE_COL.r, OUTLINE_COL.g, OUTLINE_COL.b, OUTLINE_COL.a)
     for k in range(CIRCLE_STEPS):
@@ -253,18 +252,15 @@ def lighten(c, a=80):
 
 def rebuild(splines):
     fp = [full_poly(s['pts']) for s in splines]
-    draw_segs = []
-    for si, s in enumerate(splines):
-        for poly, z0, z1, gt0, gt1 in build_segments(s['pts']):
-            wpoly, vnorm = build_poly_and_normals(poly)
-            draw_segs.append({
-                'wpoly': wpoly, 'vnorm': vnorm,
-                'z0': z0, 'z1': z1,
-                'gt0': gt0, 'gt1': gt1,
-                'si': si, 'thick': s['thick'],
-                'color': s['color'], 'color2': s['color2']
-            })
-    return fp, draw_segs
+    strips = []
+    for s in splines:
+        verts, vnorm = build_full_strip(s['pts'])
+        strips.append({
+            'verts': verts, 'vnorm': vnorm,
+            'thick': s['thick'],
+            'color': s['color'], 'color2': s['color2']
+        })
+    return fp, strips
 
 def is_endpoint(pts, pi):
     return pi == 0 or pi == len(pts) - 1
@@ -294,7 +290,7 @@ def main():
          'color': ROPE_COLORS[1][0], 'color2': ROPE_COLORS[1][1], 'thick': DEFAULT_THICK},
     ]
 
-    full_polys, draw_segs = rebuild(splines)
+    full_polys, strips = rebuild(splines)
     drag_s        = -1
     drag_p        = -1
     hov_s         = -1
@@ -309,7 +305,7 @@ def main():
         shift = rl.is_key_down(rl.KEY_LEFT_SHIFT) or rl.is_key_down(rl.KEY_RIGHT_SHIFT)
 
         if dirty:
-            full_polys, draw_segs = rebuild(splines)
+            full_polys, strips = rebuild(splines)
             dirty = False
 
         if drag_s == -1:
@@ -338,10 +334,12 @@ def main():
                 dirty = True
             if rl.is_key_pressed(rl.KEY_Q) and hov_s > 0:
                 splines.insert(hov_s-1, splines.pop(hov_s))
+                strips.insert(hov_s-1, strips.pop(hov_s))
                 hov_s -= 1
                 dirty = True
             if rl.is_key_pressed(rl.KEY_E) and hov_s < len(splines)-1:
                 splines.insert(hov_s+1, splines.pop(hov_s))
+                strips.insert(hov_s+1, strips.pop(hov_s))
                 hov_s += 1
                 dirty = True
 
@@ -396,22 +394,19 @@ def main():
 
         rl.begin_mode_3d(camera)
 
-        for seg in draw_segs:
-            half_out = seg['thick'] * 0.5 + OUTLINE_PAD
-            half_in  = seg['thick'] * 0.5
-            draw_strip_3d(seg['wpoly'], seg['vnorm'], half_out,
-                          seg['color'], seg['color2'],
-                          seg['z0'], seg['z1'], seg['gt0'], seg['gt1'], True)
-            draw_strip_3d(seg['wpoly'], seg['vnorm'], half_in,
-                          seg['color'], seg['color2'],
-                          seg['z0'], seg['z1'], seg['gt0'], seg['gt1'], False)
+        for st in strips:
+            half_out = st['thick'] * 0.5 + OUTLINE_PAD
+            half_in  = st['thick'] * 0.5
+            draw_strip_3d(st['verts'], st['vnorm'], half_out,
+                          st['color'], st['color2'], True)
+            draw_strip_3d(st['verts'], st['vnorm'], half_in,
+                          st['color'], st['color2'], False)
 
         for si, sp in enumerate(splines):
             for pi, p in enumerate(sp['pts']):
                 wx, wy, pz = p
                 is_end = is_endpoint(sp['pts'], pi)
                 r = HOVER_R * 1.4 if (si == drag_s and pi == drag_p) else HOVER_R
-                # pick color from gradient position
                 gt = 0.0 if len(sp['pts']) <= 1 else pi / (len(sp['pts']) - 1)
                 base = lerp_color(sp['color'], sp['color2'], gt)
                 fill = lighten(base, 60) if is_end else lighten(base, 20)
