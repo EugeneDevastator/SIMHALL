@@ -382,7 +382,7 @@ def main():
             if shift:
                 if len(sp['pts']) > 2:
                     bi, bd = nearest_pt(sp['pts'], mx, my)
-                    if bd < HOVER_R * 3 and not is_endpoint(sp['pts'], bi):
+                    if bd < HOVER_R * 3:
                         sp['pts'].pop(bi)
                         dirty = True
             else:
@@ -421,7 +421,7 @@ def main():
         if hov_s >= 0:
             sp = splines[hov_s]
             info = f"spline={hov_s}  thick={sp['thick']:.0f}"
-            if hov_p >= 0:
+            if hov_p >= 0 and (len(sp['pts'])-1 >= hov_p):
                 info += f"  pt={hov_p}  z={sp['pts'][hov_p][2]}"
             rl.draw_text(info, 20, 60, FONT_SIZE, sp['color'])
 
