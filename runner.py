@@ -4,8 +4,8 @@ import ast
 import subprocess
 import sys
 
-SCREEN_W = 900
-SCREEN_H = 600
+SCREEN_W = 1280
+SCREEN_H = 900
 
 LIST_W   = 260
 INFO_W   = SCREEN_W - LIST_W

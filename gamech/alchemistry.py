@@ -1,3 +1,6 @@
+"""
+Chemical mixing mechanic to make alchemy more interesting
+"""
 import pyray as rl
 import math
 
