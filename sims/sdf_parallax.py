@@ -98,7 +98,7 @@ def _glTexImage2D():
                ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p)
 
 # ── Volume ────────────────────────────────────────────────────────────────────
-VOL_W, VOL_H, NUM_SLICES = 128, 128, 16
+VOL_W, VOL_H, NUM_SLICES = 64, 64, 16
 
 def generate_parametric_sdf():
     """
@@ -139,7 +139,7 @@ def generate_parametric_sdf():
         best < 0,
         0.5 + (-best / inside_d)  * 0.5,
         0.5 - ( best / outside_d) * 0.5,
-    )
+        )
     encoded[best >= 1e8] = 0.0
     return np.clip(encoded, 0.0, 1.0).astype(np.float32)
 
@@ -156,9 +156,9 @@ def upload_texture_3d(sdf):
     _glTexParameteri()(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE)
     _glTexParameteri()(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R,     GL_CLAMP_TO_EDGE)
     _glTexImage3D()(GL_TEXTURE_3D, 0, GL_R8,
-                   VOL_W, VOL_H, NUM_SLICES,
-                   0, GL_RED, GL_UNSIGNED_BYTE,
-                   data.ctypes.data_as(ctypes.c_void_p))
+                    VOL_W, VOL_H, NUM_SLICES,
+                    0, GL_RED, GL_UNSIGNED_BYTE,
+                    data.ctypes.data_as(ctypes.c_void_p))
     _glBindTexture()(GL_TEXTURE_3D, 0)
     return tid.value
 
@@ -175,8 +175,8 @@ def make_debug_texture(layer_u8):
     _glTexParameteri()(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     _glTexParameteri()(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
     _glTexImage2D()(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
-                   GL_RGBA, GL_UNSIGNED_BYTE,
-                   rgba.ctypes.data_as(ctypes.c_void_p))
+                    GL_RGBA, GL_UNSIGNED_BYTE,
+                    rgba.ctypes.data_as(ctypes.c_void_p))
     _glBindTexture()(GL_TEXTURE_2D, 0)
     t         = Texture2D()
     t.id      = tid.value
@@ -195,7 +195,7 @@ def bind_texture_3d_to_slot(tex_id, slot):
 
 
 # ── Shaders ───────────────────────────────────────────────────────────────────
-VERT_SRC = b"""
+VERT_SRC = """
 #version 330 core
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
@@ -204,14 +204,14 @@ uniform mat4 mvp;
 uniform mat4 uModel;
 uniform vec3 uCamPos;
 
-out vec2 vUV;
+out vec2 vUV;       // raw [0,1] — tiling handled in fragment shader
 out vec3 vObjView;
 
 void main() {
     mat3 invRot   = transpose(mat3(uModel));
     vec3 worldPos = (uModel * vec4(vertexPosition, 1.0)).xyz;
     vObjView      = invRot * (uCamPos - worldPos);
-    vUV           = vertexTexCoord * 2.0;
+    vUV           = vertexTexCoord;   // keep [0,1]; tile count set by uTiles
     gl_Position   = mvp * vec4(vertexPosition, 1.0);
 }
 """
@@ -225,6 +225,7 @@ uniform sampler3D sdfVol;
 uniform float     uDepth;
 uniform float     uThresh;
 uniform float     uMaxParallax;
+uniform float     uTiles;      // how many times the SDF tiles across the quad
 
 out vec4 fragColor;
 
@@ -233,10 +234,11 @@ const int   REFINE_STEPS = 8;
 const float SURF         = 0.5;
 const float FADE_START   = 0.85;
 
+// Sample the SDF. p.xy is in tiled space [0, uTiles]; we fract-wrap into [0,1].
+// Out-of-bounds in z returns miss sentinel.
 float sd(vec3 p) {
-    if (any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
-        return -999.0;
-    return (texture(sdfVol, p).r - SURF) * 2.0;
+    vec2 uv = fract(p.xy);          // wrap each tile back into [0,1]
+    return (texture(sdfVol, vec3(uv, p.z)).r - SURF) * 2.0;
 }
 
 vec3 sdfNormal(vec3 p) {
@@ -249,13 +251,20 @@ vec3 sdfNormal(vec3 p) {
 }
 
 void main() {
+    // Scale raw [0,1] UV into tiled space [0, uTiles]
+    vec2 tiledUV = vUV * uTiles;
+
     float ny = vObjView.y;
     if (ny <= 0.0) {
-        fragColor = vec4(vec3(texture(sdfVol, vec3(vUV, 0.0)).r * 0.3), 1.0);
+        fragColor = vec4(vec3(texture(sdfVol, vec3(fract(tiledUV), 0.0)).r * 0.3), 1.0);
         return;
     }
 
-    vec2  rawRatio   = -vObjView.xz / ny;
+    // Parallax ratio in tiled UV space.
+    // vObjView.xz is in object units; the quad spans [-1,1] in object space
+    // but [0, uTiles] in tiled UV space, so multiply ratio by uTiles * 0.5
+    // to convert object-space parallax into tiled-UV parallax.
+    vec2  rawRatio   = (-vObjView.xz / ny) * uTiles * 0.5;
     float ratioLen   = length(rawRatio);
     float clampedLen = min(ratioLen, uMaxParallax);
     float fadeT      = smoothstep(FADE_START * uMaxParallax, uMaxParallax, ratioLen);
@@ -274,8 +283,9 @@ void main() {
 
     for (int i = 1; i <= STEPS; i++) {
         float t = float(i) * dz;
-        float d = sd(vec3(vUV + totalShift * t, t));
-        if (d < -999.0 + 1.0) break;
+        // z out-of-bounds = past the bottom of the shell, stop
+        if (t > 1.0) break;
+        float d = sd(vec3(tiledUV + totalShift * t, t));
         if (d > uThresh) { tHit = t; break; }
         tPrev = t;
     }
@@ -284,22 +294,22 @@ void main() {
         float tLo = tPrev, tHi = tHit;
         for (int r = 0; r < REFINE_STEPS; r++) {
             float tMid = (tLo + tHi) * 0.5;
-            if (sd(vec3(vUV + totalShift * tMid, tMid)) > uThresh) tHi = tMid;
+            if (sd(vec3(tiledUV + totalShift * tMid, tMid)) > uThresh) tHi = tMid;
             else tLo = tMid;
         }
         tHit = (tLo + tHi) * 0.5;
     }
 
     if (tHit < 0.0) {
-        float raw  = texture(sdfVol, vec3(vUV, 0.0)).r;
-        vec2  gf   = abs(fract(vUV * 8.0) - 0.5);
+        float raw  = texture(sdfVol, vec3(fract(tiledUV), 0.0)).r;
+        vec2  gf   = abs(fract(tiledUV * 4.0) - 0.5);
         float grid = step(0.45, max(gf.x, gf.y));
         vec3  col  = mix(vec3(0.3,0.0,0.0), vec3(0.0,0.3,0.0), raw*2.0);
         fragColor  = vec4(col + vec3(grid*0.1), 1.0);
         return;
     }
 
-    vec3  hitP   = vec3(vUV + totalShift * tHit, tHit);
+    vec3  hitP   = vec3(tiledUV + totalShift * tHit, tHit);
     vec3  n      = normalize(mix(sdfNormal(hitP), vec3(0.0,1.0,0.0), fadeT));
     vec3  vDir   = normalize(vObjView);
     vec3  l      = normalize(vec3(0.5, 1.0, 0.3));
@@ -349,7 +359,7 @@ def main():
     sdf = generate_parametric_sdf()
     print(f"SDF range: [{sdf.min():.3f}, {sdf.max():.3f}]")
 
-    init_window(960, 720, b"SDF Shell | WASD=rotate QE=depth RF=thresh ESC=quit")
+    init_window(1280, 920, b"SDF Shell | WASD=rotate QE=depth RF=thresh ESC=quit")
     set_target_fps(60)
 
     # GL proc addresses resolved here — context is guaranteed live after init_window
@@ -369,6 +379,7 @@ def main():
     loc_depth  = get_shader_location(shader, "uDepth")
     loc_thresh = get_shader_location(shader, "uThresh")
     loc_maxpar = get_shader_location(shader, "uMaxParallax")
+    loc_tiles  = get_shader_location(shader, "uTiles")
 
     # Pin the 3D sampler to texture unit 1 (done once; re-bound each frame
     # because raylib's batch flush can disturb texture unit state)
@@ -387,7 +398,7 @@ def main():
     rot_x, rot_y = 0.0, 0.0
     depth        = 0.3
     thresh       = 0.05
-    max_parallax = 8.0
+    max_parallax = 18.0
 
     RSPEED, DSPEED, TSPEED = 1.6, 0.3, 0.04
     DBG = 128
@@ -412,6 +423,7 @@ def main():
         set_float(shader, loc_depth,  depth)
         set_float(shader, loc_thresh, thresh)
         set_float(shader, loc_maxpar, max_parallax)
+        set_float(shader, loc_tiles, 2)
 
         bind_texture_3d_to_slot(tex3d, 1)  # re-bind after any rl batch flush
 
