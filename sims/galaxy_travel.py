@@ -8,7 +8,29 @@ FONT_SIZE = 32
 RENDER_STARS = 100_00
 GALAXY_RADIUS_LY = 50_000.0
 NUM_ARMS = 4
-TRAVEL_DURATION = 5.0
+
+C_KM_S = 299_792.0  # speed of light in km/s
+LY_PER_YEAR = 1.0   # by definition at c
+
+# speed steps: mix of real craft speeds and fractions of c
+# stored as fraction of c
+SPEED_STEPS = [
+    17.0       / C_KM_S,   # Voyager
+    70.0       / C_KM_S,   # best chemical
+    500.0      / C_KM_S,   # ion drive theoretical
+    3000.0     / C_KM_S,   # ~0.01c
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    ]
+
+AMBIENT_SIM_SPEED = 1_000_000.0  # yr/s so galaxy visibly spins
 
 def color(r, g, b, a=255):
     return rl.Color(r, g, b, a)
@@ -32,10 +54,7 @@ COL_UI_DIM      = color(140, 140, 180)
 COL_RESULT_BG   = color(0, 0, 0, 180)
 COL_RESULT_TXT  = color(100, 255, 150)
 
-# flat rotation curve: 220 km/s -> ly/yr
 V_ORBIT_LY_YR = 220.0 * 3.154e7 / 9.461e12  # ~0.000733 ly/yr
-# ambient sim speed: 1M yr per real second so spin is visible
-AMBIENT_SIM_SPEED = 1_000_000.0
 
 class State:
     def __init__(self):
@@ -49,20 +68,16 @@ class State:
         self.target_star = -1
         self.ship_x      = 0.0
         self.ship_y      = 0.0
-        self.speed_c     = 1.0
+        self.speed_idx   = 9          # default 1.0c
 
         self.cam_x    = 0.0
         self.cam_y    = 0.0
         self.cam_zoom = 0.008
 
-        self.traveling     = False
-        self.travel_timer  = 0.0
-        self.travel_from_x = 0.0
-        self.travel_from_y = 0.0
-        self.travel_to_x   = 0.0
-        self.travel_to_y   = 0.0
-        self.travel_years  = 0.0
-        self.sim_speed     = 0.0
+        self.traveling      = False
+        self.travel_sim_speed = 0.0   # sim yr per real second, fixed at travel start
+        self.travel_years   = 0.0     # total trip distance in years
+        self.travel_elapsed_yr = 0.0  # sim years elapsed this trip
 
         self.result_text  = ""
         self.result_timer = 0.0
@@ -74,6 +89,12 @@ class State:
         self.drag_sy     = 0
         self.drag_cx     = 0.0
         self.drag_cy     = 0.0
+
+def speed_c(state):
+    return SPEED_STEPS[state.speed_idx]
+
+def speed_km_s(state):
+    return speed_c(state) * C_KM_S
 
 def orbital_omega(r_ly):
     if r_ly < 1.0:
@@ -99,7 +120,7 @@ def generate_galaxy(state):
     for i in range(n):
         r = random.expovariate(1.0 / 15000.0)
         r = max(100.0, min(r, GALAXY_RADIUS_LY))
-        arm = random.randint(0, NUM_ARMS - 1)
+        arm   = random.randint(0, NUM_ARMS - 1)
         angle = spiral_angle(r, arm) + random.gauss(0, 0.25)
 
         state.stars_r[i]     = r
@@ -109,8 +130,8 @@ def generate_galaxy(state):
         state.stars_omega[i] = orbital_omega(r)
 
     state.ship_star = random.randint(0, n - 1)
-    state.ship_x = state.stars_x[state.ship_star]
-    state.ship_y = state.stars_y[state.ship_star]
+    state.ship_x    = state.stars_x[state.ship_star]
+    state.ship_y    = state.stars_y[state.ship_star]
 
 def world_to_screen(wx, wy, state):
     sx = int((wx - state.cam_x) * state.cam_zoom + SCREEN_W / 2)
@@ -136,14 +157,10 @@ def find_nearest_star(wx, wy, state, radius_world):
 
 def star_color(i):
     t = ((i * 2654435761) & 0xFFFF) / 65535.0
-    if t < 0.3:
-        return COL_STAR_BLUE
-    elif t < 0.6:
-        return COL_STAR_WHITE
-    elif t < 0.8:
-        return COL_STAR_ORANGE
-    else:
-        return COL_STAR_RED
+    if t < 0.3:   return COL_STAR_BLUE
+    elif t < 0.6: return COL_STAR_WHITE
+    elif t < 0.8: return COL_STAR_ORANGE
+    else:         return COL_STAR_RED
 
 def rotate_galaxy(state, dt_years):
     for i in range(RENDER_STARS):
@@ -154,12 +171,29 @@ def rotate_galaxy(state, dt_years):
 
 def format_years(yr):
     if yr >= 1_000_000_000:
-        return f"{yr/1e9:.2f} billion years"
+        return f"{yr/1e9:.3f} billion years"
     elif yr >= 1_000_000:
-        return f"{yr/1e6:.2f} million years"
+        return f"{yr/1e6:.3f} million years"
     elif yr >= 1_000:
         return f"{yr/1e3:.2f} thousand years"
-    return f"{yr:.1f} years"
+    return f"{yr:.2f} years"
+
+def format_speed(state):
+    sc  = speed_c(state)
+    kms = speed_km_s(state)
+    if sc >= 0.01:
+        return f"{sc:.2f}c  ({kms:,.0f} km/s)"
+    elif kms >= 1.0:
+        return f"{kms:.1f} km/s  ({sc:.2e}c)"
+    else:
+        return f"{kms*1000:.1f} m/s  ({sc:.2e}c)"
+
+def dist_to_target(state):
+    if state.target_star < 0:
+        return 0.0
+    dx = state.stars_x[state.target_star] - state.ship_x
+    dy = state.stars_y[state.target_star] - state.ship_y
+    return math.sqrt(dx * dx + dy * dy)
 
 def main():
     rl.init_window(SCREEN_W, SCREEN_H, "Galaxy Scale Simulation")
@@ -182,7 +216,7 @@ def main():
             state.cam_zoom *= 1.1 ** wheel
             state.cam_zoom = max(0.00005, min(state.cam_zoom, 5.0))
 
-        # pan (middle mouse)
+        # pan
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_MIDDLE):
             state.drag_active = True
             state.drag_sx     = mx
@@ -199,7 +233,7 @@ def main():
         snap = max(500.0, min(3000.0 / state.cam_zoom, 20000.0))
         state.hover_star = find_nearest_star(wx, wy, state, snap)
 
-        # select target (left click)
+        # select target
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT) and not state.traveling:
             if state.hover_star >= 0 and state.hover_star != state.ship_star:
                 state.target_star = state.hover_star
@@ -207,48 +241,54 @@ def main():
         # speed adjust
         if not state.traveling:
             if rl.is_key_pressed(rl.KEY_UP):
-                state.speed_c = min(10.0, round(state.speed_c + 0.1, 1))
+                state.speed_idx = min(len(SPEED_STEPS) - 1, state.speed_idx + 1)
             if rl.is_key_pressed(rl.KEY_DOWN):
-                state.speed_c = max(0.001, round(state.speed_c - 0.1, 1))
+                state.speed_idx = max(0, state.speed_idx - 1)
 
         # start travel
         if rl.is_key_pressed(rl.KEY_SPACE) and not state.traveling and state.target_star >= 0:
-            tx   = state.stars_x[state.target_star]
-            ty   = state.stars_y[state.target_star]
-            dx   = tx - state.ship_x
-            dy   = ty - state.ship_y
-            dist = math.sqrt(dx * dx + dy * dy)
-            state.travel_years  = dist / state.speed_c
-            state.travel_from_x = state.ship_x
-            state.travel_from_y = state.ship_y
-            state.travel_to_x   = tx
-            state.travel_to_y   = ty
-            state.travel_timer  = 0.0
-            state.traveling     = True
-            state.result_text   = ""
-            # compress travel_years into TRAVEL_DURATION real seconds
-            state.sim_speed     = state.travel_years / TRAVEL_DURATION
+            d = dist_to_target(state)
+            sc = speed_c(state)
+            # travel_years = distance in ly / speed in ly/yr (= fraction of c)
+            state.travel_years       = d / sc
+            state.travel_elapsed_yr  = 0.0
+            state.traveling          = True
+            state.result_text        = ""
+            # compress so 1 real second = enough sim years to feel responsive
+            # use 5s as reference for 1c crossing 1 ly -> scale by actual trip
+            # sim_speed: we want the trip to take at least 3s real time for short hops
+            # and cap at reasonable rate. Just use: 1 real second = travel_years/5 sim years
+            # but minimum 1M yr/s so galaxy still spins visibly for short trips
+            state.travel_sim_speed = max(state.travel_years / 5.0, AMBIENT_SIM_SPEED)
 
         # --- update ---
         if state.traveling:
-            state.travel_timer += dt
-            t  = min(state.travel_timer / TRAVEL_DURATION, 1.0)
-            ts = t * t * (3.0 - 2.0 * t)
-            state.ship_x = state.travel_from_x + (state.travel_to_x - state.travel_from_x) * ts
-            state.ship_y = state.travel_from_y + (state.travel_to_y - state.travel_from_y) * ts
-
-            dt_years = state.sim_speed * dt
-            state.sim_time += dt_years
+            dt_years = state.travel_sim_speed * dt
+            state.sim_time          += dt_years
+            state.travel_elapsed_yr += dt_years
             rotate_galaxy(state, dt_years)
 
-            if state.travel_timer >= TRAVEL_DURATION:
+            # ship chases current position of target star
+            tx = state.stars_x[state.target_star]
+            ty = state.stars_y[state.target_star]
+            dx = tx - state.ship_x
+            dy = ty - state.ship_y
+            remaining_ly = math.sqrt(dx * dx + dy * dy)
+
+            # ship moves speed_c ly per sim-year
+            move_ly = speed_c(state) * dt_years
+            if move_ly >= remaining_ly:
+                state.ship_x      = tx
+                state.ship_y      = ty
                 state.traveling   = False
                 state.ship_star   = state.target_star
-                state.ship_x      = state.stars_x[state.target_star]
-                state.ship_y      = state.stars_y[state.target_star]
                 state.target_star = -1
-                state.result_text  = "Travel took " + format_years(state.travel_years)
-                state.result_timer = 6.0
+                state.result_text  = "Travel took " + format_years(state.travel_elapsed_yr)
+                state.result_timer = 8.0
+            else:
+                frac = move_ly / remaining_ly
+                state.ship_x += dx * frac
+                state.ship_y += dy * frac
         else:
             dt_years = AMBIENT_SIM_SPEED * dt
             state.sim_time += dt_years
@@ -266,34 +306,36 @@ def main():
             if 0 <= sx < SCREEN_W and 0 <= sy < SCREEN_H:
                 rl.draw_pixel(sx, sy, star_color(i))
 
-        # travel line
+        # travel line: ship -> target
         if state.target_star >= 0 or state.traveling:
-            tx  = state.travel_to_x if state.traveling else state.stars_x[state.target_star]
-            ty  = state.travel_to_y if state.traveling else state.stars_y[state.target_star]
-            sx1, sy1 = world_to_screen(state.ship_x, state.ship_y, state)
-            sx2, sy2 = world_to_screen(tx, ty, state)
-            rl.draw_line(sx1, sy1, sx2, sy2, COL_LINE)
+            tidx = state.target_star if state.target_star >= 0 else state.ship_star
+            if state.traveling and state.target_star >= 0:
+                tidx = state.target_star
+            if tidx >= 0:
+                sx1, sy1 = world_to_screen(state.ship_x, state.ship_y, state)
+                sx2, sy2 = world_to_screen(state.stars_x[tidx], state.stars_y[tidx], state)
+                rl.draw_line(sx1, sy1, sx2, sy2, COL_LINE)
 
-        # hover ring
+        # hover
         if state.hover_star >= 0 and not state.traveling:
             hx, hy = world_to_screen(
                 state.stars_x[state.hover_star],
                 state.stars_y[state.hover_star], state)
             rl.draw_circle_lines(hx, hy, 6, COL_HOVER)
 
-        # target ring
+        # target
         if state.target_star >= 0:
             tx2, ty2 = world_to_screen(
                 state.stars_x[state.target_star],
                 state.stars_y[state.target_star], state)
             rl.draw_circle_lines(tx2, ty2, 8, COL_TARGET)
 
-        # ship dot
+        # ship
         sx, sy = world_to_screen(state.ship_x, state.ship_y, state)
         rl.draw_circle(sx, sy, 5, COL_SHIP)
         rl.draw_circle_lines(sx, sy, 10, COL_SHIP_RING)
 
-        # UI panel
+        # UI
         pad = 16
         y   = pad
         rl.draw_text("GALAXY SCALE SIMULATION", pad, y, FONT_SIZE, COL_UI_TITLE)
@@ -301,36 +343,32 @@ def main():
         rl.draw_text(
             f"Real stars: ~300 billion  |  Rendered: {RENDER_STARS:,}",
             pad, y, 22, COL_UI_INFO)
-        y += 28
+        y += 30
+
         rl.draw_text(
-            f"Ship speed: {state.speed_c:.1f}c   [UP/DOWN]",
-            pad, y, 24, COL_UI_SPEED)
-        y += 32
+            f"Speed: {format_speed(state)}   [UP/DOWN]",
+            pad, y, 26, COL_UI_SPEED)
+        y += 34
 
         if state.target_star >= 0 and not state.traveling:
-            tx   = state.stars_x[state.target_star]
-            ty   = state.stars_y[state.target_star]
-            dist = math.sqrt((tx - state.ship_x)**2 + (ty - state.ship_y)**2)
-            yr   = dist / state.speed_c
+            d  = dist_to_target(state)
+            yr = d / speed_c(state)
             rl.draw_text(
-                f"Distance: {dist:,.0f} ly  |  Travel time: {format_years(yr)}",
+                f"Distance: {d:,.0f} ly  |  Trip: {format_years(yr)}",
                 pad, y, 24, COL_UI_DIST)
-            y += 32
-            rl.draw_text("SPACE to travel", pad, y, 24, color(255, 220, 80))
+            y += 30
+            rl.draw_text("SPACE to travel", pad, y, 26, color(255, 220, 80))
         elif not state.traveling:
-            rl.draw_text(
-                "Click a star to select destination",
-                pad, y, 24, COL_UI_DIM)
+            rl.draw_text("Click a star to select destination", pad, y, 24, COL_UI_DIM)
 
         if state.traveling:
-            pct = min(state.travel_timer / TRAVEL_DURATION, 1.0) * 100.0
+            d_rem = dist_to_target(state) if state.target_star >= 0 else 0.0
             rl.draw_text(
-                f"TRAVELING... {pct:.0f}%  |  {format_years(state.travel_years)} in 5s",
+                f"TRAVELING  |  Elapsed: {format_years(state.travel_elapsed_yr)}  |  Remaining: {d_rem:,.0f} ly",
                 pad, y, 24, COL_UI_TRAVEL)
-            y += 32
-            elapsed_yr = (state.travel_timer / TRAVEL_DURATION) * state.travel_years
+            y += 30
             rl.draw_text(
-                f"Sim years elapsed this trip: {format_years(elapsed_yr)}",
+                f"Total trip: {format_years(state.travel_years)}",
                 pad, y, 22, COL_UI_INFO)
 
         # result banner
@@ -341,10 +379,9 @@ def main():
             rl.draw_rectangle(rx - 20, ry - 10, tw + 40, FONT_SIZE + 28, COL_RESULT_BG)
             rl.draw_text(state.result_text, rx, ry, FONT_SIZE + 8, COL_RESULT_TXT)
 
-        # bottom bar
+        # bottom
         rl.draw_text(
-            f"Sim time: {state.sim_time/1e9:.3f} billion years  |  "
-            f"Ambient: {AMBIENT_SIM_SPEED/1e6:.0f}M yr/s",
+            f"Sim time: {state.sim_time/1e9:.4f} billion years",
             pad, SCREEN_H - 36, 22, COL_UI_DIM)
         hint = "Scroll=zoom  |  Middle-drag=pan  |  Click=target  |  SPACE=travel"
         hw = rl.measure_text(hint, 20)
