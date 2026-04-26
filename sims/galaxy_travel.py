@@ -1,3 +1,7 @@
+"""
+Galaxy travelling simulation
+shows how different travel speeds compare with galaxy spinning rate
+"""
 import pyray as rl
 import math
 import random
@@ -246,20 +250,24 @@ def main():
                 state.speed_idx = max(0, state.speed_idx - 1)
 
         # start travel
-        if rl.is_key_pressed(rl.KEY_SPACE) and not state.traveling and state.target_star >= 0:
-            d = dist_to_target(state)
-            sc = speed_c(state)
-            # travel_years = distance in ly / speed in ly/yr (= fraction of c)
-            state.travel_years       = d / sc
-            state.travel_elapsed_yr  = 0.0
-            state.traveling          = True
-            state.result_text        = ""
-            # compress so 1 real second = enough sim years to feel responsive
-            # use 5s as reference for 1c crossing 1 ly -> scale by actual trip
-            # sim_speed: we want the trip to take at least 3s real time for short hops
-            # and cap at reasonable rate. Just use: 1 real second = travel_years/5 sim years
-            # but minimum 1M yr/s so galaxy still spins visibly for short trips
-            state.travel_sim_speed = max(state.travel_years / 5.0, AMBIENT_SIM_SPEED)
+        # start/stop travel
+        if rl.is_key_pressed(rl.KEY_SPACE):
+            if state.traveling:
+                # abort: park at current position, find nearest star
+                state.traveling   = False
+                state.target_star = -1
+                nearest = find_nearest_star(state.ship_x, state.ship_y, state, 99999999.0)
+                state.ship_star   = nearest
+                state.result_text  = "Travel aborted after " + format_years(state.travel_elapsed_yr)
+                state.result_timer = 8.0
+            elif state.target_star >= 0:
+                d = dist_to_target(state)
+                sc = speed_c(state)
+                state.travel_years       = d / sc
+                state.travel_elapsed_yr  = 0.0
+                state.traveling          = True
+                state.result_text        = ""
+                state.travel_sim_speed = max(state.travel_years / 5.0, AMBIENT_SIM_SPEED)
 
         # --- update ---
         if state.traveling:
