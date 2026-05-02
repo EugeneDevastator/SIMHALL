@@ -23,7 +23,7 @@ CAT_TXT = rl.Color(160, 160, 180, 255)
 
 FS  = 24
 FSS = 21
-FSC = 18  # category label
+FSC = 18
 
 ITEM_H   = 52
 CAT_H    = 32
@@ -63,12 +63,6 @@ def read_sim_meta(path):
 
 
 def scan_all():
-    """
-    Returns list of row dicts:
-      type="cat"  -> {type, label}
-      type="sim"  -> {type, name, path, desc, png}
-    Also returns flat list of sim-only dicts for indexed selection.
-    """
     rows = []
     sims = []
     base = os.path.dirname(os.path.abspath(__file__))
@@ -94,18 +88,23 @@ def scan_all():
 
 
 def wrap_text(text, max_chars):
-    words = text.split()
+    """Respects existing newlines, then word-wraps each paragraph."""
     lines = []
-    cur = ""
-    for w in words:
-        if len(cur) + len(w) + (1 if cur else 0) <= max_chars:
-            cur = cur + (" " if cur else "") + w
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
+    for paragraph in text.split("\n"):
+        if paragraph.strip() == "":
+            lines.append("")
+            continue
+        words = paragraph.split()
+        cur = ""
+        for w in words:
+            if len(cur) + len(w) + (1 if cur else 0) <= max_chars:
+                cur = cur + (" " if cur else "") + w
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
     return lines
 
 
@@ -131,7 +130,7 @@ font_s = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FSS, None, 0)
 font_c = rl.load_font_ex("C:/Windows/Fonts/arialbd.ttf", FSC, None, 0)
 
 rows, sims = scan_all()
-selected     = 0  # index into sims[]
+selected     = 0
 preview_tex  = None
 preview_name = None
 scroll_offset = 0
@@ -155,7 +154,6 @@ while not rl.window_should_close():
         max_scroll = max(0, total_list_height(rows) - (SCREEN_H - HEADER_H))
         scroll_offset = max(0, min(scroll_offset, max_scroll))
 
-    # click in list: map pixel -> row -> sim index
     if lmb and mx < LIST_W and my > HEADER_H:
         cy = HEADER_H - scroll_offset
         sim_idx = 0
@@ -168,7 +166,6 @@ while not rl.window_should_close():
                 sim_idx += 1
             cy += rh
 
-    # load preview
     if sims:
         cur = sims[selected]
         if cur["name"] != preview_name:
@@ -183,18 +180,15 @@ while not rl.window_should_close():
     if lmb and btn_hov and sims:
         launch(sims[selected]["path"])
 
-    # ---- DRAW ----
     rl.begin_drawing()
     rl.clear_background(BG)
 
-    # header
     rl.draw_rectangle(0, 0, SCREEN_W, HEADER_H, rl.Color(40, 40, 50, 255))
     rl.draw_text_ex(font,   "SIM RUNNER", rl.Vector2(12, 10),          FS,  1, TEXT_COL)
     rl.draw_text_ex(font_s, "F5 reload",  rl.Vector2(LIST_W + 12, 14), FSS, 1, DIM_COL)
 
     rl.draw_rectangle(LIST_W - 1, 0, 1, SCREEN_H, DIV_COL)
 
-    # --- list ---
     rl.begin_scissor_mode(0, HEADER_H, LIST_W, SCREEN_H - HEADER_H)
     cy = HEADER_H - scroll_offset
     sim_idx = 0
@@ -221,7 +215,6 @@ while not rl.window_should_close():
             sim_idx += 1
     rl.end_scissor_mode()
 
-    # --- info panel ---
     pad   = 12
     img_x = LIST_W + pad
     img_y = HEADER_H + pad
