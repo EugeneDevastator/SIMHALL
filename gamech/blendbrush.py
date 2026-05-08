@@ -9,6 +9,7 @@ in vec4 fragColor;
 uniform sampler2D texture0;
 uniform vec4 rectBounds;
 uniform float seed;
+uniform float aspect;
 
 out vec4 finalColor;
 
@@ -22,19 +23,26 @@ void main() {
 
     vec2 rMin = rectBounds.xy;
     vec2 rMax = rectBounds.xy + rectBounds.zw;
-    float inside = float(uv.x >= rMin.x && uv.x <= rMax.x &&
-                         uv.y >= rMin.y && uv.y <= rMax.y);
 
-    if (inside < 0.5) {
+    vec2 center = (rMin + rMax) * 0.5;
+    vec2 halfSize = (rMax - rMin) * 0.5;
+
+    vec2 d = (uv - center) / halfSize;
+    d.x *= aspect;
+    float dist = length(d);
+
+    float mask = 1.0 - smoothstep(0.7, 1.0, dist);
+
+    if (mask < 0.01) {
         finalColor = dst;
         return;
     }
 
     vec3 noise = vec3(
-        hash(uv/5, seed)       * 0.08 - 0.04,
-        hash(uv/5, seed + 1.0) * 0.08 - 0.04,
-        hash(uv/5, seed + 2.0) * 0.08 - 0.04
-    );
+        hash(uv / 5.0, seed)       * 0.08 - 0.04,
+        hash(uv / 5.0, seed + 1.0) * 0.08 - 0.04,
+        hash(uv / 5.0, seed + 2.0) * 0.08 - 0.04
+    ) * mask;
 
     finalColor = vec4(clamp(dst.rgb + noise, 0.0, 1.0), dst.a);
 }
@@ -59,7 +67,6 @@ def make_rt():
     return rl.load_render_texture(W, H)
 
 def apply_rect(shader, locs, src_rt, dst_rt, px, py, pw, ph, seed):
-    # py is already in RT space (flipped)
     rl.set_shader_value(shader, locs["rectBounds"],
         rl.Vector4(px/W, py/H, pw/W, ph/H),
         rl.ShaderUniformDataType.SHADER_UNIFORM_VEC4)
@@ -76,7 +83,7 @@ def apply_rect(shader, locs, src_rt, dst_rt, px, py, pw, ph, seed):
     rl.end_texture_mode()
 
 def main():
-    rl.init_window(W, H, "Noise Brush Demo")
+    rl.init_window(W, H, "Noise Brush Round")
     rl.set_target_fps(60)
 
     shader = rl.load_shader_from_memory(VERT, FRAG)
@@ -84,7 +91,13 @@ def main():
     locs = {
         "rectBounds": rl.get_shader_location(shader, "rectBounds"),
         "seed":       rl.get_shader_location(shader, "seed"),
+        "aspect":     rl.get_shader_location(shader, "aspect"),
     }
+
+    aspect_val = rl.ffi.new("float[1]", [W / H])
+    rl.set_shader_value(shader, locs["aspect"],
+        aspect_val,
+        rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT)
 
     rt = [make_rt(), make_rt()]
     cur = 0
@@ -99,7 +112,6 @@ def main():
     while not rl.window_should_close():
         if rl.is_mouse_button_down(rl.MouseButton.MOUSE_BUTTON_LEFT):
             mp = rl.get_mouse_position()
-            # flip Y: screen Y -> RT UV Y
             rt_y = H - mp.y
             nxt = 1 - cur
             apply_rect(shader, locs, rt[cur], rt[nxt],
