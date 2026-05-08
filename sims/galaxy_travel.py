@@ -9,20 +9,23 @@ import random
 SCREEN_W = 1920
 SCREEN_H = 1080
 FONT_SIZE = 32
-RENDER_STARS = 100_00
+RENDER_STARS = 10_000
 GALAXY_RADIUS_LY = 50_000.0
 NUM_ARMS = 4
 
-C_KM_S = 299_792.0  # speed of light in km/s
-LY_PER_YEAR = 1.0   # by definition at c
+C_KM_S = 299_792.0
+LY_PER_YEAR = 1.0
 
-# speed steps: mix of real craft speeds and fractions of c
-# stored as fraction of c
+ANDROMEDA_VISUAL_X = -80_000.0
+ANDROMEDA_VISUAL_Y = 0.0
+ANDROMEDA_VISUAL_RADIUS = 12_000.0
+ANDROMEDA_TRAVEL_DIST_LY = 2_500_000.0
+
 SPEED_STEPS = [
-    17.0       / C_KM_S,   # Voyager
-    70.0       / C_KM_S,   # best chemical
-    500.0      / C_KM_S,   # ion drive theoretical
-    3000.0     / C_KM_S,   # ~0.01c
+    17.0       / C_KM_S,
+    70.0       / C_KM_S,
+    500.0      / C_KM_S,
+    3000.0     / C_KM_S,
     0.01,
     0.05,
     0.1,
@@ -32,33 +35,37 @@ SPEED_STEPS = [
     2.0,
     5.0,
     10.0,
-    ]
+]
 
-AMBIENT_SIM_SPEED = 1_000_000.0  # yr/s so galaxy visibly spins
+AMBIENT_SIM_SPEED = 1_000_000.0  # yr/s
 
 def color(r, g, b, a=255):
     return rl.Color(r, g, b, a)
 
-COL_BG          = color(5, 5, 15)
-COL_STAR_BLUE   = color(180, 200, 255, 200)
-COL_STAR_WHITE  = color(255, 255, 220, 200)
-COL_STAR_ORANGE = color(255, 220, 180, 200)
-COL_STAR_RED    = color(255, 180, 180, 200)
-COL_SHIP        = color(255, 80, 80)
-COL_SHIP_RING   = color(255, 80, 80, 180)
-COL_TARGET      = color(100, 255, 100)
-COL_HOVER       = color(255, 255, 100, 200)
-COL_LINE        = color(100, 200, 255, 120)
-COL_UI_TITLE    = color(200, 200, 255)
-COL_UI_INFO     = color(160, 160, 200)
-COL_UI_SPEED    = color(200, 220, 255)
-COL_UI_DIST     = color(100, 255, 150)
-COL_UI_TRAVEL   = color(255, 150, 50)
-COL_UI_DIM      = color(140, 140, 180)
-COL_RESULT_BG   = color(0, 0, 0, 180)
-COL_RESULT_TXT  = color(100, 255, 150)
+COL_BG            = color(5, 5, 15)
+COL_STAR_BLUE     = color(180, 200, 255, 200)
+COL_STAR_WHITE    = color(255, 255, 220, 200)
+COL_STAR_ORANGE   = color(255, 220, 180, 200)
+COL_STAR_RED      = color(255, 180, 180, 200)
+COL_SHIP          = color(255, 80, 80)
+COL_SHIP_RING     = color(255, 80, 80, 180)
+COL_TARGET        = color(100, 255, 100)
+COL_HOVER         = color(255, 255, 100, 200)
+COL_LINE          = color(100, 200, 255, 120)
+COL_UI_TITLE      = color(200, 200, 255)
+COL_UI_INFO       = color(160, 160, 200)
+COL_UI_SPEED      = color(200, 220, 255)
+COL_UI_DIST       = color(100, 255, 150)
+COL_UI_TRAVEL     = color(255, 150, 50)
+COL_UI_DIM        = color(140, 140, 180)
+COL_RESULT_BG     = color(0, 0, 0, 180)
+COL_RESULT_TXT    = color(100, 255, 150)
+COL_ANDROMEDA     = color(255, 220, 50)
+COL_ANDROMEDA_HOV = color(255, 255, 120, 220)
 
-V_ORBIT_LY_YR = 220.0 * 3.154e7 / 9.461e12  # ~0.000733 ly/yr
+V_ORBIT_LY_YR = 220.0 * 3.154e7 / 9.461e12
+
+ANDROMEDA_HIT_PX = 20
 
 class State:
     def __init__(self):
@@ -70,29 +77,38 @@ class State:
 
         self.ship_star   = 0
         self.target_star = -1
+        self.target_andromeda = False
         self.ship_x      = 0.0
         self.ship_y      = 0.0
-        self.speed_idx   = 9          # default 1.0c
+        self.speed_idx   = 9
 
         self.cam_x    = 0.0
         self.cam_y    = 0.0
         self.cam_zoom = 0.008
 
-        self.traveling      = False
-        self.travel_sim_speed = 0.0   # sim yr per real second, fixed at travel start
-        self.travel_years   = 0.0     # total trip distance in years
-        self.travel_elapsed_yr = 0.0  # sim years elapsed this trip
+        self.traveling         = False
+        self.travel_sim_speed  = 0.0
+        self.travel_years      = 0.0
+        self.travel_elapsed_yr = 0.0
+
+        self.travel_start_x = 0.0
+        self.travel_start_y = 0.0
+        self.travel_end_x   = 0.0
+        self.travel_end_y   = 0.0
 
         self.result_text  = ""
         self.result_timer = 0.0
         self.sim_time     = 0.0
         self.hover_star   = -1
+        self.hover_andromeda = False
 
         self.drag_active = False
         self.drag_sx     = 0
         self.drag_sy     = 0
         self.drag_cx     = 0.0
         self.drag_cy     = 0.0
+
+        self.at_andromeda = False
 
 def speed_c(state):
     return SPEED_STEPS[state.speed_idx]
@@ -159,6 +175,20 @@ def find_nearest_star(wx, wy, state, radius_world):
             best    = i
     return best
 
+def andromeda_screen_pos(state):
+    return world_to_screen(ANDROMEDA_VISUAL_X, ANDROMEDA_VISUAL_Y, state)
+
+def andromeda_screen_radius(state):
+    return max(6, int(ANDROMEDA_VISUAL_RADIUS * state.cam_zoom))
+
+def is_hover_andromeda(mx, my, state):
+    ax, ay = andromeda_screen_pos(state)
+    ar = andromeda_screen_radius(state)
+    hit = max(ar, ANDROMEDA_HIT_PX)
+    dx = mx - ax
+    dy = my - ay
+    return (dx * dx + dy * dy) < hit * hit
+
 def star_color(i):
     t = ((i * 2654435761) & 0xFFFF) / 65535.0
     if t < 0.3:   return COL_STAR_BLUE
@@ -192,7 +222,12 @@ def format_speed(state):
     else:
         return f"{kms*1000:.1f} m/s  ({sc:.2e}c)"
 
-def dist_to_target(state):
+def travel_dist(state):
+    # Andromeda <-> Milky Way always uses the real intergalactic distance
+    if state.target_andromeda:
+        return ANDROMEDA_TRAVEL_DIST_LY
+    if state.at_andromeda and state.target_star >= 0:
+        return ANDROMEDA_TRAVEL_DIST_LY
     if state.target_star < 0:
         return 0.0
     dx = state.stars_x[state.target_star] - state.ship_x
@@ -234,13 +269,21 @@ def main():
             state.cam_y = state.drag_cy - (my - state.drag_sy) / state.cam_zoom
 
         # hover
-        snap = max(500.0, min(3000.0 / state.cam_zoom, 20000.0))
-        state.hover_star = find_nearest_star(wx, wy, state, snap)
+        state.hover_andromeda = is_hover_andromeda(mx, my, state) and not state.traveling
+        if state.hover_andromeda:
+            state.hover_star = -1
+        else:
+            snap = max(500.0, min(3000.0 / state.cam_zoom, 20000.0))
+            state.hover_star = find_nearest_star(wx, wy, state, snap)
 
         # select target
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT) and not state.traveling:
-            if state.hover_star >= 0 and state.hover_star != state.ship_star:
-                state.target_star = state.hover_star
+            if state.hover_andromeda and not state.at_andromeda:
+                state.target_andromeda = True
+                state.target_star      = -1
+            elif state.hover_star >= 0 and state.hover_star != state.ship_star:
+                state.target_star      = state.hover_star
+                state.target_andromeda = False
 
         # speed adjust
         if not state.traveling:
@@ -249,54 +292,58 @@ def main():
             if rl.is_key_pressed(rl.KEY_DOWN):
                 state.speed_idx = max(0, state.speed_idx - 1)
 
-        # start travel
         # start/stop travel
         if rl.is_key_pressed(rl.KEY_SPACE):
             if state.traveling:
-                # abort: park at current position, find nearest star
-                state.traveling   = False
-                state.target_star = -1
-                nearest = find_nearest_star(state.ship_x, state.ship_y, state, 99999999.0)
-                state.ship_star   = nearest
+                state.traveling        = False
+                state.target_star      = -1
+                state.target_andromeda = False
                 state.result_text  = "Travel aborted after " + format_years(state.travel_elapsed_yr)
                 state.result_timer = 8.0
-            elif state.target_star >= 0:
-                d = dist_to_target(state)
+            elif state.target_andromeda or state.target_star >= 0:
+                d  = travel_dist(state)
                 sc = speed_c(state)
-                state.travel_years       = d / sc
-                state.travel_elapsed_yr  = 0.0
-                state.traveling          = True
-                state.result_text        = ""
-                state.travel_sim_speed = max(state.travel_years / 5.0, AMBIENT_SIM_SPEED)
+                state.travel_years      = d / sc
+                state.travel_elapsed_yr = 0.0
+                state.traveling         = True
+                state.result_text       = ""
+                state.travel_sim_speed  = max(state.travel_years / 5.0, AMBIENT_SIM_SPEED)
+
+                state.travel_start_x = state.ship_x
+                state.travel_start_y = state.ship_y
+                if state.target_andromeda:
+                    state.travel_end_x = ANDROMEDA_VISUAL_X
+                    state.travel_end_y = ANDROMEDA_VISUAL_Y
+                else:
+                    state.travel_end_x = state.stars_x[state.target_star]
+                    state.travel_end_y = state.stars_y[state.target_star]
 
         # --- update ---
         if state.traveling:
             dt_years = state.travel_sim_speed * dt
             state.sim_time          += dt_years
             state.travel_elapsed_yr += dt_years
+
+            frac = min(state.travel_elapsed_yr / state.travel_years, 1.0) if state.travel_years > 0 else 1.0
+            state.ship_x = state.travel_start_x + (state.travel_end_x - state.travel_start_x) * frac
+            state.ship_y = state.travel_start_y + (state.travel_end_y - state.travel_start_y) * frac
+
             rotate_galaxy(state, dt_years)
 
-            # ship chases current position of target star
-            tx = state.stars_x[state.target_star]
-            ty = state.stars_y[state.target_star]
-            dx = tx - state.ship_x
-            dy = ty - state.ship_y
-            remaining_ly = math.sqrt(dx * dx + dy * dy)
-
-            # ship moves speed_c ly per sim-year
-            move_ly = speed_c(state) * dt_years
-            if move_ly >= remaining_ly:
-                state.ship_x      = tx
-                state.ship_y      = ty
-                state.traveling   = False
-                state.ship_star   = state.target_star
-                state.target_star = -1
+            if frac >= 1.0:
+                state.ship_x    = state.travel_end_x
+                state.ship_y    = state.travel_end_y
+                state.traveling = False
+                if state.target_andromeda:
+                    state.at_andromeda     = True
+                    state.target_andromeda = False
+                    state.ship_star        = -1
+                else:
+                    state.at_andromeda = False
+                    state.ship_star    = state.target_star
+                    state.target_star  = -1
                 state.result_text  = "Travel took " + format_years(state.travel_elapsed_yr)
                 state.result_timer = 8.0
-            else:
-                frac = move_ly / remaining_ly
-                state.ship_x += dx * frac
-                state.ship_y += dy * frac
         else:
             dt_years = AMBIENT_SIM_SPEED * dt
             state.sim_time += dt_years
@@ -309,29 +356,45 @@ def main():
         rl.begin_drawing()
         rl.clear_background(COL_BG)
 
+        # stars
         for i in range(RENDER_STARS):
             sx, sy = world_to_screen(state.stars_x[i], state.stars_y[i], state)
             if 0 <= sx < SCREEN_W and 0 <= sy < SCREEN_H:
                 rl.draw_pixel(sx, sy, star_color(i))
 
-        # travel line: ship -> target
-        if state.target_star >= 0 or state.traveling:
-            tidx = state.target_star if state.target_star >= 0 else state.ship_star
-            if state.traveling and state.target_star >= 0:
-                tidx = state.target_star
-            if tidx >= 0:
-                sx1, sy1 = world_to_screen(state.ship_x, state.ship_y, state)
-                sx2, sy2 = world_to_screen(state.stars_x[tidx], state.stars_y[tidx], state)
-                rl.draw_line(sx1, sy1, sx2, sy2, COL_LINE)
+        # andromeda
+        ax, ay = andromeda_screen_pos(state)
+        ar = andromeda_screen_radius(state)
+        rl.draw_circle_lines(ax, ay, ar, COL_ANDROMEDA)
+        rl.draw_text("Andromeda", ax - rl.measure_text("Andromeda", 20) // 2, ay + ar + 4, 20, COL_ANDROMEDA)
 
-        # hover
+        if state.hover_andromeda and not state.at_andromeda:
+            rl.draw_circle_lines(ax, ay, ar + 6, COL_ANDROMEDA_HOV)
+
+        if state.target_andromeda:
+            rl.draw_circle_lines(ax, ay, ar + 10, COL_TARGET)
+
+        # travel line
+        if state.traveling or state.target_star >= 0 or state.target_andromeda:
+            if state.traveling:
+                ex, ey = world_to_screen(state.travel_end_x, state.travel_end_y, state)
+            elif state.target_andromeda:
+                ex, ey = ax, ay
+            else:
+                ex, ey = world_to_screen(
+                    state.stars_x[state.target_star],
+                    state.stars_y[state.target_star], state)
+            sx1, sy1 = world_to_screen(state.ship_x, state.ship_y, state)
+            rl.draw_line(sx1, sy1, ex, ey, COL_LINE)
+
+        # hover star
         if state.hover_star >= 0 and not state.traveling:
             hx, hy = world_to_screen(
                 state.stars_x[state.hover_star],
                 state.stars_y[state.hover_star], state)
             rl.draw_circle_lines(hx, hy, 6, COL_HOVER)
 
-        # target
+        # target star
         if state.target_star >= 0:
             tx2, ty2 = world_to_screen(
                 state.stars_x[state.target_star],
@@ -339,9 +402,9 @@ def main():
             rl.draw_circle_lines(tx2, ty2, 8, COL_TARGET)
 
         # ship
-        sx, sy = world_to_screen(state.ship_x, state.ship_y, state)
-        rl.draw_circle(sx, sy, 5, COL_SHIP)
-        rl.draw_circle_lines(sx, sy, 10, COL_SHIP_RING)
+        ssx, ssy = world_to_screen(state.ship_x, state.ship_y, state)
+        rl.draw_circle(ssx, ssy, 5, COL_SHIP)
+        rl.draw_circle_lines(ssx, ssy, 10, COL_SHIP_RING)
 
         # UI
         pad = 16
@@ -358,21 +421,26 @@ def main():
             pad, y, 26, COL_UI_SPEED)
         y += 34
 
-        if state.target_star >= 0 and not state.traveling:
-            d  = dist_to_target(state)
+        has_target = state.target_star >= 0 or state.target_andromeda
+        if has_target and not state.traveling:
+            d  = travel_dist(state)
             yr = d / speed_c(state)
+            dest = "Andromeda Galaxy" if state.target_andromeda else "target star"
             rl.draw_text(
-                f"Distance: {d:,.0f} ly  |  Trip: {format_years(yr)}",
+                f"To {dest}: {d:,.0f} ly  |  Trip: {format_years(yr)}",
                 pad, y, 24, COL_UI_DIST)
             y += 30
             rl.draw_text("SPACE to travel", pad, y, 26, color(255, 220, 80))
         elif not state.traveling:
-            rl.draw_text("Click a star to select destination", pad, y, 24, COL_UI_DIM)
+            loc = "Andromeda Galaxy" if state.at_andromeda else "Milky Way"
+            rl.draw_text(f"Location: {loc}  |  Click target, SPACE to travel", pad, y, 24, COL_UI_DIM)
 
         if state.traveling:
-            d_rem = dist_to_target(state) if state.target_star >= 0 else 0.0
+            dest_name = "Andromeda" if state.target_andromeda else "target"
+            frac_disp = min(state.travel_elapsed_yr / state.travel_years, 1.0) if state.travel_years > 0 else 1.0
+            remaining_ly = (1.0 - frac_disp) * travel_dist(state)
             rl.draw_text(
-                f"TRAVELING  |  Elapsed: {format_years(state.travel_elapsed_yr)}  |  Remaining: {d_rem:,.0f} ly",
+                f"TRAVELING to {dest_name}  |  Elapsed: {format_years(state.travel_elapsed_yr)}  |  Remaining: {remaining_ly:,.0f} ly",
                 pad, y, 24, COL_UI_TRAVEL)
             y += 30
             rl.draw_text(
