@@ -38,13 +38,18 @@ void main() {
         return;
     }
 
+    // smudge: sample from above the brush rect
+    vec2 smudgeOffset = vec2(0.0, rectBounds.w);
+    vec4 smudgeSrc = texture(texture0, uv + smudgeOffset);
+    vec3 smudged = mix(dst.rgb, smudgeSrc.rgb, mask * 0.5);
+
     vec3 noise = vec3(
         hash(uv / 5.0, seed)       * 0.08 - 0.04,
         hash(uv / 5.0, seed + 1.0) * 0.08 - 0.04,
         hash(uv / 5.0, seed + 2.0) * 0.08 - 0.04
     ) * mask;
 
-    finalColor = vec4(clamp(dst.rgb + noise, 0.0, 1.0), dst.a);
+    finalColor = vec4(clamp(smudged + noise, 0.0, 1.0), dst.a);
 }
 """
 
@@ -83,7 +88,7 @@ def apply_rect(shader, locs, src_rt, dst_rt, px, py, pw, ph, seed):
     rl.end_texture_mode()
 
 def main():
-    rl.init_window(W, H, "Noise Brush Round")
+    rl.init_window(W, H, "Noise Brush Smudge")
     rl.set_target_fps(60)
 
     shader = rl.load_shader_from_memory(VERT, FRAG)

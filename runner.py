@@ -72,11 +72,26 @@ def scan_all():
     )
     for d in dirs:
         folder = os.path.join(base, d)
-        files = sorted(f for f in os.listdir(folder) if f.endswith(".py"))
-        if not files:
+
+        # direct .py files in category folder
+        direct_files = sorted(f for f in os.listdir(folder) if f.endswith(".py"))
+
+        # subfolders: look for subfolder/subfolder.py
+        sub_entries = []
+        for sub in sorted(os.listdir(folder)):
+            sub_path = os.path.join(folder, sub)
+            if not os.path.isdir(sub_path) or sub in SKIP_DIRS or sub.startswith("."):
+                continue
+            main_py = os.path.join(sub_path, sub + ".py")
+            if os.path.isfile(main_py):
+                sub_entries.append((sub, main_py))
+
+        if not direct_files and not sub_entries:
             continue
+
         rows.append({"type": "cat", "label": d})
-        for fname in files:
+
+        for fname in direct_files:
             name = fname[:-3]
             path = os.path.join(folder, fname)
             desc = read_sim_meta(path)
@@ -84,7 +99,16 @@ def scan_all():
             entry = {"type": "sim", "name": name, "path": path, "desc": desc, "png": png}
             rows.append(entry)
             sims.append(entry)
+
+        for sub, main_py in sub_entries:
+            desc = read_sim_meta(main_py)
+            png  = os.path.join(folder, sub + ".png")   # png from category folder
+            entry = {"type": "sim", "name": sub, "path": main_py, "desc": desc, "png": png}
+            rows.append(entry)
+            sims.append(entry)
+
     return rows, sims
+
 
 
 def wrap_text(text, max_chars):
