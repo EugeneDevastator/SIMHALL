@@ -1,5 +1,6 @@
 import pyray as rl
 from pyray import ffi
+import math
 
 SW, SH = 940, 680
 PANEL_X = 10
@@ -71,12 +72,20 @@ vec3 oklab_to_linear(vec3 lab) {
 }
 
 void main() {
-    float s1 = sin(fragTexCoord.x * 3.14159);
-    float s2 = sin(fragTexCoord.y * 3.14159);
+    // UV: x goes left-right, y goes top-bottom (may be flipped by RT)
+    float u = fragTexCoord.x;
+    float v = abs(fragTexCoord.y);  // abs handles RT flip
+
+    // ramp: 0 at edges, 1 at center
+    float s1 = sin(u * 3.14159265);          // horizontal ramp for layer 1
+    float s2 = sin(v * 3.14159265);          // vertical ramp for layer 2
+
+    vec3 paper = linear_to_oklab(vec3(1.0));
 
     vec3 lab1 = vec3(0.0);
     vec3 lab2 = vec3(0.0);
     float total1 = 0.0, total2 = 0.0;
+
     for (int i = 0; i < 8; i++) {
         vec3 lab = linear_to_oklab(srgb_to_linear(pigments[i]));
         lab1 += w1[i] * lab;
@@ -84,21 +93,28 @@ void main() {
         total1 += w1[i];
         total2 += w2[i];
     }
-    vec3 paper = linear_to_oklab(vec3(1.0));
-    if (total1 > 0.001) lab1 /= total1; else lab1 = paper;
-    if (total2 > 0.001) lab2 /= total2; else lab2 = paper;
 
-    float total = s1 + s2;
-    vec3 lab;
-    if (total < 0.001) {
-        lab = paper;
-    } else {
-        vec3 pigmix = (s1 * lab1 + s2 * lab2) / total;
-        float coverage = clamp(total, 0.0, 1.0);
-        lab = mix(paper, pigmix, coverage);
-    }
+    if (total1 > 0.001) lab1 /= total1;
+    if (total2 > 0.001) lab2 /= total2;
 
-    vec3 rgb = linear_to_srgb(clamp(oklab_to_linear(lab), 0.0, 1.0));
+    float c1 = (total1 > 0.001) ? s1 : 0.0;
+    float c2 = (total2 > 0.001) ? s2 : 0.0;
+
+    // Subtractive-ish blend: composite both layers over paper
+    // Use Kubelka-Munk-inspired approach: multiply transmittances
+    // Layer opacity = coverage * max_weight (so slider amount controls density)
+    float density1 = clamp(total1, 0.0, 1.0);
+    float density2 = clamp(total2, 0.0, 1.0);
+
+    float alpha1 = c1 * density1;
+    float alpha2 = c2 * density2;
+
+    // Composite: paper -> layer1 -> layer2
+    vec3 col = paper;
+    col = mix(col, lab1, alpha1);
+    col = mix(col, lab2, alpha2);
+
+    vec3 rgb = linear_to_srgb(clamp(oklab_to_linear(col), 0.0, 1.0));
     finalColor = vec4(rgb, 1.0);
 }
 """
@@ -131,14 +147,17 @@ def main():
 
     shader = rl.load_shader_from_memory(VERT_SHADER, FRAG_SHADER)
 
-    # 1x1 white texture — draw_texture_pro emits proper UV coords
+    canvas_rt = rl.load_render_texture(CANVAS_W, CANVAS_H)
+
     img = rl.gen_image_color(1, 1, rl.WHITE)
     white_tex = rl.load_texture_from_image(img)
     rl.unload_image(img)
 
-    src    = rl.Rectangle(0, 0, 1, 1)
-    canvas = rl.Rectangle(CX, CY, CANVAS_W, CANVAS_H)
-    origin = rl.Vector2(0, 0)
+    src_small  = rl.Rectangle(0, 0, 1, 1)
+    full_quad  = rl.Rectangle(0, 0, CANVAS_W, CANVAS_H)
+    origin     = rl.Vector2(0, 0)
+    src_rt     = rl.Rectangle(0, 0, CANVAS_W, -CANVAS_H)
+    dst_canvas = rl.Rectangle(CX, CY, CANVAS_W, CANVAS_H)
 
     SLIDER_X = PANEL_X + 10
     SLIDER_W = 170
@@ -166,14 +185,18 @@ def main():
 
         set_shader_uniforms(shader)
 
+        rl.begin_texture_mode(canvas_rt)
+        rl.clear_background(rl.WHITE)
+        rl.begin_shader_mode(shader)
+        rl.draw_texture_pro(white_tex, src_small, full_quad, origin, 0.0, rl.WHITE)
+        rl.end_shader_mode()
+        rl.end_texture_mode()
+
         rl.begin_drawing()
         rl.clear_background(rl.Color(240, 238, 232, 255))
 
-        rl.begin_shader_mode(shader)
-        rl.draw_texture_pro(white_tex, src, canvas, origin, 0.0, rl.WHITE)
-        rl.end_shader_mode()
-
-        rl.draw_rectangle_lines(CX, CY, CANVAS_W, CANVAS_H, rl.Color(160, 160, 160, 255))
+        rl.draw_texture_pro(canvas_rt.texture, src_rt, dst_canvas, origin, 0.0, rl.WHITE)
+        rl.draw_rectangle_lines_ex(dst_canvas, 1, rl.Color(160, 160, 160, 255))
         rl.draw_text("Canvas — GPU Oklab pigment blend", CX, CY - 22, 15,
                      rl.Color(100, 100, 100, 255))
 
@@ -198,6 +221,7 @@ def main():
 
     rl.unload_shader(shader)
     rl.unload_texture(white_tex)
+    rl.unload_render_texture(canvas_rt)
     rl.close_window()
 
 if __name__ == "__main__":
