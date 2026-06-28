@@ -1,3 +1,6 @@
+"""
+physically-realistically em wave based color blending
+"""
 import pyray as rl
 from pyray import ffi
 import math
@@ -59,6 +62,7 @@ void main() {
         vec3 hue_rgb = srgb_to_linear(hue_to_rgb(hues[i]));
         acc += hue_rgb * waves_h[i] * ramp_h;
         acc += hue_rgb * waves_v[i] * ramp_v;
+        acc = abs(acc);
     }
 
     acc = clamp(acc, 0.0, 1.0);
@@ -76,7 +80,7 @@ dragging_h = [False] * 8
 dragging_v = [False] * 8
 
 FONT_SIZE = 22
-VAL_W = 52       # value label column width
+VAL_W = 52
 SLIDER_H = 18
 ITEM_H = 28
 SLIDER_X = 8
@@ -92,12 +96,15 @@ def hue_to_pyray_color(h, brightness=1.0):
 def draw_slider(i, sy, amps, dragging, mx, my, mouse_down, mouse_pressed):
     hue = ALL_HUES[i]
     amp = amps[i]
-    col = hue_to_pyray_color(hue)
-    col_dim = hue_to_pyray_color(hue, 0.45)
 
-    # value label on the left, colored
+    # color brightness reflects absolute amplitude (eye doesn't see phase)
+    brightness = abs(amp)
+    col_full = hue_to_pyray_color(hue)
+    col_bright = hue_to_pyray_color(hue, max(0.15, brightness))
+
+    # value label: show sign so user knows phase, colored by hue at full brightness
     val_str = f"{amp:+.2f}"
-    rl.draw_text(val_str, SLIDER_X, sy, FONT_SIZE, col)
+    rl.draw_text(val_str, SLIDER_X, sy, FONT_SIZE, col_bright)
 
     sx = SLIDER_X + VAL_W
     rect = rl.Rectangle(sx, sy + 1, SLIDER_W, SLIDER_H)
@@ -108,6 +115,8 @@ def draw_slider(i, sy, amps, dragging, mx, my, mouse_down, mouse_pressed):
         val = (mx - sx) / SLIDER_W * 2.0 - 1.0
         amps[i] = max(-1.0, min(1.0, val))
         amp = amps[i]
+        brightness = abs(amp)
+        col_bright = hue_to_pyray_color(hue, max(0.15, brightness))
     elif not mouse_down:
         dragging[i] = False
 
@@ -115,17 +124,19 @@ def draw_slider(i, sy, amps, dragging, mx, my, mouse_down, mouse_pressed):
     rl.draw_rectangle(sx, sy + 1, SLIDER_W, SLIDER_H, rl.Color(50, 50, 55, 255))
 
     cx_px = sx + SLIDER_W // 2
-    fill_w = int(amp * (SLIDER_W // 2))
-    if fill_w > 0:
-        rl.draw_rectangle(cx_px, sy + 1, fill_w, SLIDER_H, col)
-    elif fill_w < 0:
-        rl.draw_rectangle(cx_px + fill_w, sy + 1, -fill_w, SLIDER_H, col_dim)
+
+    # fill always extends from center outward, colored by hue brightness = |amp|
+    fill_w = int(abs(amp) * (SLIDER_W // 2))
+    if amp >= 0:
+        rl.draw_rectangle(cx_px, sy + 1, fill_w, SLIDER_H, col_bright)
+    else:
+        rl.draw_rectangle(cx_px - fill_w, sy + 1, fill_w, SLIDER_H, col_bright)
 
     # center line
     rl.draw_line(cx_px, sy + 1, cx_px, sy + 1 + SLIDER_H, rl.Color(130, 130, 130, 255))
     rl.draw_rectangle_lines_ex(rect, 1, rl.Color(75, 75, 80, 255))
 
-    # thumb
+    # thumb position still encodes sign (left = negative, right = positive)
     thumb_x = sx + int((amp + 1.0) / 2.0 * SLIDER_W)
     rl.draw_rectangle(thumb_x - 3, sy, 6, SLIDER_H + 2, rl.WHITE)
 
@@ -154,7 +165,6 @@ def main():
     src_rt     = rl.Rectangle(0, 0, CANVAS_W, -CANVAS_H)
     dst_canvas = rl.Rectangle(CX, CY, CANVAS_W, CANVAS_H)
 
-    # section headers + 8 rows each + separator
     HEADER_H = 28
     SEP_H = 10
     PANEL_CONTENT_H = HEADER_H + 8*ITEM_H + SEP_H + HEADER_H + 8*ITEM_H + 20
@@ -191,17 +201,14 @@ def main():
 
         oy = -scroll_y
 
-        # --- Layer 1 ---
         rl.draw_text("Horizontal", SLIDER_X, oy + 4, FONT_SIZE, rl.Color(180, 180, 180, 255))
         for i in range(8):
             sy = oy + HEADER_H + i * ITEM_H
             draw_slider(i, sy, amps_h, dragging_h, mx, panel_my, mouse_down, mouse_pressed)
 
-        # --- separator ---
         sep_y = oy + HEADER_H + 8 * ITEM_H + 4
         rl.draw_line(8, sep_y, PANEL_W - 8, sep_y, rl.Color(70, 70, 75, 255))
 
-        # --- Layer 2 ---
         h2y = sep_y + SEP_H
         rl.draw_text("Vertical", SLIDER_X, h2y + 2, FONT_SIZE, rl.Color(180, 180, 180, 255))
         for i in range(8):
@@ -210,7 +217,6 @@ def main():
 
         rl.end_scissor_mode()
 
-        # --- canvas ---
         rl.draw_texture_pro(canvas_rt.texture, src_rt, dst_canvas, origin, 0.0, rl.WHITE)
         rl.draw_rectangle_lines_ex(dst_canvas, 1, rl.Color(70, 70, 75, 255))
 
